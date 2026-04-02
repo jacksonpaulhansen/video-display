@@ -1,16 +1,16 @@
 {
   "github": {
     "owner": "jacksonpaulhansen",
-    "repo": "even-odds-blackjack",
+    "repo": "er-settings",
     "pat": ""
   },
-  "appName": "even-odds-blackjack",
-  "publishUrl": "https://jacksonpaulhansen.github.io/even-odds-blackjack/",
+  "appName": "ER-Settings",
+  "publishUrl": "https://jacksonpaulhansen.github.io/er-settings/",
   "git": {
     "enabled": true,
     "userName": "jacksonpaulhansen",
     "userEmail": "270181675+jacksonpaulhansen@users.noreply.github.com",
-    "remoteUrl": "https://github.com/jacksonpaulhansen/even-odds-blackjack.git",
+    "remoteUrl": "https://github.com/jacksonpaulhansen/er-settings.git",
     "branch": "main",
     "commitMessagePrefix": "publish",
     "autoSetGithubPagesUrl": true,
@@ -21,7 +21,7 @@
       }
     ],
     "repos": [
-      "https://github.com/jacksonpaulhansen/even-odds-blackjack.git"
+      "https://github.com/jacksonpaulhansen/er-settings.git"
     ],
     "deployed": false
   }

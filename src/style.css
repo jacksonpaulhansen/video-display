@@ -67,6 +67,11 @@ body {
   border: 1px solid rgba(0, 255, 58, 0.35);
 }
 
+.hud-preview-detail {
+  text-align: left;
+  border: 1px solid rgba(0, 255, 58, 0.2);
+}
+
 .hint {
   margin: 12px 0 0;
   color: #9a9a9a;
@@ -284,4 +289,124 @@ body {
   color: #8cc08c;
   font-size: 0.68rem;
   white-space: pre-wrap;
+}
+
+.setup-shell {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.8fr) minmax(260px, 1.2fr);
+  gap: 10px;
+}
+
+.setup-sections,
+.setup-detail {
+  border: 1px solid #2a352a;
+  border-radius: 6px;
+  background: #0b100b;
+  padding: 8px;
+}
+
+.pane-title {
+  color: #8fcf8f;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 6px;
+}
+
+.setup-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.setup-list-item {
+  border: 1px solid #334033;
+  background: #101810;
+  color: #c9d8c9;
+  border-radius: 5px;
+  text-align: left;
+  padding: 6px 8px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 0.74rem;
+  cursor: pointer;
+}
+
+.setup-list-item .idx {
+  color: #86a986;
+  min-width: 15px;
+}
+
+.setup-list-item.active {
+  border-color: #4f6e4f;
+  background: #142014;
+}
+
+.setup-list-item.focus {
+  box-shadow: 0 0 0 1px rgba(0, 255, 58, 0.22);
+}
+
+.detail-card {
+  min-height: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.detail-title {
+  color: #d2f0d2;
+  font-size: 0.84rem;
+  font-weight: 600;
+}
+
+.detail-lines {
+  display: grid;
+  gap: 5px;
+}
+
+.detail-line {
+  color: #a8b8a8;
+  font-size: 0.74rem;
+}
+
+.detail-controls {
+  margin-top: 4px;
+  display: grid;
+  gap: 6px;
+}
+
+.detail-control {
+  border: 1px solid #3d4d3d;
+  background: #131b13;
+  color: #d6e5d6;
+  border-radius: 5px;
+  text-align: left;
+  padding: 6px 8px;
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+
+.detail-control.active {
+  border-color: #5f805f;
+}
+
+.detail-control.focus {
+  box-shadow: 0 0 0 1px rgba(0, 255, 58, 0.2);
+}
+
+.detail-control:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.detail-empty {
+  color: #869486;
+  font-size: 0.72rem;
+}
+
+@media (max-width: 760px) {
+  .setup-shell {
+    grid-template-columns: 1fr;
+  }
 }
