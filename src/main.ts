@@ -26,7 +26,7 @@ type ImageFilters = {
   zoom: number;       // 1.0 … 4.0
   panX: number;       // -100 … 100, 0 = center
   panY: number;       // -100 … 100, 0 = center
-  imgScale: number;   // 1.0 … 4.0, physical display size on glasses
+  imgBig: boolean;    // false = 1 tile 200×100, true = 4 tiles 400×200
 };
 
 type UserSettings = {
@@ -53,17 +53,23 @@ type AppState = {
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const CONTROL_URL = 'http://127.0.0.1:8787';
+const CONTROL_URL = `http://${window.location.hostname}:8787`;
 const REQUIRED_CONTROL_CAPABILITY = 'publish-app';
 const HIDE_DEBUG_TOOLS = true;
 const DEV_TOOLS_TOGGLE_SHORTCUT = 'Ctrl+Shift+D';
 const MAX_APP_NAME_LENGTH = 20;
 
-// Glasses image container — SDK max: 200×100 px
-const IMAGE_CONTAINER_ID = 1;
-const IMAGE_CONTAINER_NAME = 'videoFrame';
-const IMAGE_W = 178; // 16:9 ratio at 100 px tall
-const IMAGE_H = 100;
+// Glasses image container — SDK max: 200×100 px per tile
+const IMAGE_TILE_W = 200;
+const IMAGE_TILE_H = 100;
+// Small: 1 tile centered; Big: 2×2 grid of tiles = 400×200 total
+const TILE_IDS   = [1, 2, 3, 4] as const;
+const TILE_NAMES = ['tile1', 'tile2', 'tile3', 'tile4'] as const;
+// Big mode tile positions (TL, TR, BL, BR) — 4 tiles centered on 576×288
+const BIG_X = (576 - IMAGE_TILE_W * 2) / 2; // 88
+const BIG_Y = (288 - IMAGE_TILE_H * 2) / 2; // 44
+const SMALL_X = (576 - IMAGE_TILE_W) / 2;   // 188
+const SMALL_Y = (288 - IMAGE_TILE_H) / 2;   // 94
 
 const BROWSER_STORAGE_KEY = 'video-display:v2';
 const DEFAULT_FPS = 30;
@@ -77,7 +83,7 @@ const DEFAULT_FILTERS: ImageFilters = {
   zoom: 1,
   panX: 0,
   panY: 0,
-  imgScale: 1,
+  imgBig: false,
 };
 
 // ── State ─────────────────────────────────────────────────────────────────────
@@ -104,10 +110,16 @@ let debugToolsVisible = !HIDE_DEBUG_TOOLS;
 let isTransmittingFrame = false;
 let frameIntervalId: ReturnType<typeof setInterval> | null = null;
 let _frameLoggedSkip = false;
+// Master canvas — small: 200×100, big: 400×200
 const captureCanvas = document.createElement('canvas');
-captureCanvas.width = IMAGE_W;
-captureCanvas.height = IMAGE_H;
+captureCanvas.width = IMAGE_TILE_W;
+captureCanvas.height = IMAGE_TILE_H;
 const captureCtx = captureCanvas.getContext('2d')!;
+// Per-tile canvas used when slicing big-mode master into 4 quadrants
+const tileCanvas = document.createElement('canvas');
+tileCanvas.width = IMAGE_TILE_W;
+tileCanvas.height = IMAGE_TILE_H;
+const tileCtx = tileCanvas.getContext('2d')!;
 
 // Reusable video element
 const videoEl = document.createElement('video');
@@ -183,14 +195,11 @@ app.innerHTML = `
         <input type="range" id="pany-slider" min="-100" max="100" value="0" step="1" />
         <span class="slider-val" id="pany-val">0</span>
 
-        <button class="slider-lbl" data-target="imgscale-slider" data-default="1">Img Size</button>
-        <input type="range" id="imgscale-slider" min="1" max="4" value="1" step="any" list="imgscale-ticks" />
-        <span class="slider-val" id="imgscale-val">1×</span>
-        <datalist id="imgscale-ticks">
-          <option value="1"></option>
-          <option value="2.88"></option>
-          <option value="3.24"></option>
-        </datalist>
+        <span class="slider-lbl" style="cursor:default">Img Size</span>
+        <div class="img-size-toggle slider-full">
+          <button id="img-small-btn" class="size-btn size-btn--active" type="button">Small</button>
+          <button id="img-big-btn" class="size-btn" type="button">Big</button>
+        </div>
       </div>
     </fieldset>
 
@@ -233,8 +242,8 @@ const contrastVal      = requireElement(document.querySelector<HTMLSpanElement>(
 const zoomVal          = requireElement(document.querySelector<HTMLSpanElement>('#zoom-val'), '#zoom-val');
 const panxVal          = requireElement(document.querySelector<HTMLSpanElement>('#panx-val'), '#panx-val');
 const panyVal          = requireElement(document.querySelector<HTMLSpanElement>('#pany-val'), '#pany-val');
-const imgscaleSlider   = requireElement(document.querySelector<HTMLInputElement>('#imgscale-slider'), '#imgscale-slider');
-const imgscaleVal      = requireElement(document.querySelector<HTMLSpanElement>('#imgscale-val'), '#imgscale-val');
+const imgSmallBtn      = requireElement(document.querySelector<HTMLButtonElement>('#img-small-btn'), '#img-small-btn');
+const imgBigBtn        = requireElement(document.querySelector<HTMLButtonElement>('#img-big-btn'), '#img-big-btn');
 
 const publishBtn         = requireElement(document.querySelector<HTMLButtonElement>('#publish-btn'), '#publish-btn');
 const ehpkBtn            = requireElement(document.querySelector<HTMLButtonElement>('#ehpk-btn'), '#ehpk-btn');
@@ -244,25 +253,21 @@ const eventLog           = requireElement(document.querySelector<HTMLPreElement>
 const publishLog         = requireElement(document.querySelector<HTMLPreElement>('#publish-log'), '#publish-log');
 const hudImagePreview    = requireElement(document.querySelector<HTMLCanvasElement>('#hud-image-preview'), '#hud-image-preview');
 
-// Size the HUD image preview to fill the sim-display proportionally
-hudImagePreview.width  = IMAGE_W;
-hudImagePreview.height = IMAGE_H;
-
-function computeImgDisplaySize(): { w: number; h: number; x: number; y: number } {
-  const scale = state.userSettings.filters.imgScale;
-  const w = Math.min(Math.round(IMAGE_W * scale), 576);
-  const h = Math.min(Math.round(IMAGE_H * scale), 288);
-  return { w, h, x: Math.round((576 - w) / 2), y: Math.round((288 - h) / 2) };
-}
 
 function updateHudPreviewLayout(): void {
-  const { w, h, x, y } = computeImgDisplaySize();
+  const big = state.userSettings.filters.imgBig;
+  const totalW = big ? IMAGE_TILE_W * 2 : IMAGE_TILE_W;
+  const totalH = big ? IMAGE_TILE_H * 2 : IMAGE_TILE_H;
+  const x = (576 - totalW) / 2;
+  const y = (288 - totalH) / 2;
+  hudImagePreview.width  = totalW;
+  hudImagePreview.height = totalH;
   hudImagePreview.style.cssText =
     `position:absolute;` +
     `left:${(x / 576) * 100}%;` +
     `top:${(y / 288) * 100}%;` +
-    `width:${(w / 576) * 100}%;` +
-    `height:${(h / 288) * 100}%;` +
+    `width:${(totalW / 576) * 100}%;` +
+    `height:${(totalH / 288) * 100}%;` +
     `border:1px solid rgba(0,200,255,0.4);` +
     `image-rendering:pixelated;`;
 }
@@ -348,26 +353,6 @@ async function tryYoutubeProxy(youtubeUrl: string): Promise<string | null> {
   }
 }
 
-// Img size snap points
-const IMG_SCALE_SNAPS: Array<{ val: number; label: string }> = [
-  { val: 1,    label: '1×'   },
-  { val: 2.88, label: 'tall' },
-  { val: 3.24, label: 'full' },
-];
-const IMG_SCALE_SNAP_THRESHOLD = 0.12;
-
-function snapImgScale(raw: number): number {
-  for (const s of IMG_SCALE_SNAPS) {
-    if (Math.abs(raw - s.val) < IMG_SCALE_SNAP_THRESHOLD) return s.val;
-  }
-  return raw;
-}
-
-function imgScaleLabel(val: number): string {
-  const snap = IMG_SCALE_SNAPS.find((s) => Math.abs(val - s.val) < 0.001);
-  return snap ? snap.label : `${val.toFixed(2)}×`;
-}
-
 // ── Canvas filter + transform pipeline ───────────────────────────────────────
 
 function buildCssFilter(): string {
@@ -380,21 +365,25 @@ function buildCssFilter(): string {
 }
 
 function drawFilteredFrame(): void {
-  const { zoom, panX, panY } = state.userSettings.filters;
+  const { zoom, panX, panY, imgBig } = state.userSettings.filters;
+  const cw = imgBig ? IMAGE_TILE_W * 2 : IMAGE_TILE_W;
+  const ch = imgBig ? IMAGE_TILE_H * 2 : IMAGE_TILE_H;
+
+  if (captureCanvas.width !== cw)  captureCanvas.width  = cw;
+  if (captureCanvas.height !== ch) captureCanvas.height = ch;
 
   captureCtx.filter = 'none';
   captureCtx.fillStyle = '#000';
-  captureCtx.fillRect(0, 0, IMAGE_W, IMAGE_H);
+  captureCtx.fillRect(0, 0, cw, ch);
 
   captureCtx.save();
   captureCtx.filter = buildCssFilter();
 
-  // Zoom + pan: translate to center, scale, apply pan offset, draw centered
-  const tx = (panX / 100) * (IMAGE_W * (zoom - 1)) / 2;
-  const ty = (panY / 100) * (IMAGE_H * (zoom - 1)) / 2;
-  captureCtx.translate(IMAGE_W / 2 + tx, IMAGE_H / 2 + ty);
+  const tx = (panX / 100) * (cw * (zoom - 1)) / 2;
+  const ty = (panY / 100) * (ch * (zoom - 1)) / 2;
+  captureCtx.translate(cw / 2 + tx, ch / 2 + ty);
   captureCtx.scale(zoom, zoom);
-  captureCtx.drawImage(videoEl, -IMAGE_W / 2, -IMAGE_H / 2, IMAGE_W, IMAGE_H);
+  captureCtx.drawImage(videoEl, -cw / 2, -ch / 2, cw, ch);
 
   captureCtx.restore();
 }
@@ -449,7 +438,7 @@ async function captureAndSendFrame(): Promise<void> {
 
   // Mirror to debug preview
   const previewCtx = hudImagePreview.getContext('2d');
-  if (previewCtx) previewCtx.drawImage(captureCanvas, 0, 0, IMAGE_W, IMAGE_H);
+  if (previewCtx) previewCtx.drawImage(captureCanvas, 0, 0, captureCanvas.width, captureCanvas.height);
 
   if (!bridge || !imageContainerActive) {
     if (!_frameLoggedSkip) {
@@ -459,16 +448,45 @@ async function captureAndSendFrame(): Promise<void> {
     return;
   }
 
-  const base64 = captureCanvas.toDataURL('image/jpeg', 0.6).split(',')[1];
+  const big = state.userSettings.filters.imgBig;
   isTransmittingFrame = true;
   try {
-    const result = await bridge.updateImageRawData(new ImageRawDataUpdate({
-      containerID: IMAGE_CONTAINER_ID,
-      containerName: IMAGE_CONTAINER_NAME,
-      imageData: base64,
-    }));
-    if (!ImageRawDataUpdateResult.isSuccess(result)) {
-      log(`Frame: updateImageRawData failed — ${String(result)}`);
+    if (!big) {
+      // Small: single tile
+      const base64 = captureCanvas.toDataURL('image/jpeg', 0.6).split(',')[1];
+      const result = await bridge.updateImageRawData(new ImageRawDataUpdate({
+        containerID: TILE_IDS[0],
+        containerName: TILE_NAMES[0],
+        imageData: base64,
+      }));
+      if (!ImageRawDataUpdateResult.isSuccess(result)) {
+        log(`Frame: tile1 failed — ${String(result)}`);
+      }
+    } else {
+      // Big: slice master 400×200 into 4 quadrants and send sequentially
+      const offsets = [
+        { col: 0, row: 0 }, // TL → ID 1
+        { col: 1, row: 0 }, // TR → ID 2
+        { col: 0, row: 1 }, // BL → ID 3
+        { col: 1, row: 1 }, // BR → ID 4
+      ];
+      for (let i = 0; i < 4; i++) {
+        const { col, row } = offsets[i];
+        tileCtx.drawImage(
+          captureCanvas,
+          col * IMAGE_TILE_W, row * IMAGE_TILE_H, IMAGE_TILE_W, IMAGE_TILE_H,
+          0, 0, IMAGE_TILE_W, IMAGE_TILE_H,
+        );
+        const base64 = tileCanvas.toDataURL('image/jpeg', 0.6).split(',')[1];
+        const result = await bridge.updateImageRawData(new ImageRawDataUpdate({
+          containerID: TILE_IDS[i],
+          containerName: TILE_NAMES[i],
+          imageData: base64,
+        }));
+        if (!ImageRawDataUpdateResult.isSuccess(result)) {
+          log(`Frame: tile${i + 1} failed — ${String(result)}`);
+        }
+      }
     }
   } catch (err) {
     log(`Frame: send threw — ${String(err)}`);
@@ -482,19 +500,22 @@ async function captureAndSendFrame(): Promise<void> {
 async function setupGlassesPage(withImage: boolean): Promise<void> {
   if (!bridge) return;
 
-  const { w, h, x, y } = computeImgDisplaySize();
+  const big = state.userSettings.filters.imgBig;
   const payload = withImage
-    ? {
-        containerTotalNum: 1,
-        imageObject: [new ImageContainerProperty({
-          containerID: IMAGE_CONTAINER_ID,
-          containerName: IMAGE_CONTAINER_NAME,
-          xPosition: x,
-          yPosition: y,
-          width: w,
-          height: h,
-        })],
-      }
+    ? big
+      ? {
+          containerTotalNum: 4,
+          imageObject: [
+            new ImageContainerProperty({ containerID: TILE_IDS[0], containerName: TILE_NAMES[0], xPosition: BIG_X,                  yPosition: BIG_Y,                  width: IMAGE_TILE_W, height: IMAGE_TILE_H }),
+            new ImageContainerProperty({ containerID: TILE_IDS[1], containerName: TILE_NAMES[1], xPosition: BIG_X + IMAGE_TILE_W,   yPosition: BIG_Y,                  width: IMAGE_TILE_W, height: IMAGE_TILE_H }),
+            new ImageContainerProperty({ containerID: TILE_IDS[2], containerName: TILE_NAMES[2], xPosition: BIG_X,                  yPosition: BIG_Y + IMAGE_TILE_H,   width: IMAGE_TILE_W, height: IMAGE_TILE_H }),
+            new ImageContainerProperty({ containerID: TILE_IDS[3], containerName: TILE_NAMES[3], xPosition: BIG_X + IMAGE_TILE_W,   yPosition: BIG_Y + IMAGE_TILE_H,   width: IMAGE_TILE_W, height: IMAGE_TILE_H }),
+          ],
+        }
+      : {
+          containerTotalNum: 1,
+          imageObject: [new ImageContainerProperty({ containerID: TILE_IDS[0], containerName: TILE_NAMES[0], xPosition: SMALL_X, yPosition: SMALL_Y, width: IMAGE_TILE_W, height: IMAGE_TILE_H })],
+        }
     : { containerTotalNum: 0 };
 
   if (!startupCreated) {
@@ -572,13 +593,13 @@ function updateSliderDisplays(): void {
   panySlider.value       = String(f.panY);
   invertToggle.checked   = f.invert;
 
-  imgscaleSlider.value       = String(f.imgScale);
+  imgSmallBtn.classList.toggle('size-btn--active', !f.imgBig);
+  imgBigBtn.classList.toggle('size-btn--active',   f.imgBig);
   brightnessVal.textContent  = String(f.brightness);
   contrastVal.textContent    = String(f.contrast);
   zoomVal.textContent        = `${f.zoom.toFixed(2)}×`;
   panxVal.textContent        = String(f.panX);
   panyVal.textContent        = String(f.panY);
-  imgscaleVal.textContent    = imgScaleLabel(f.imgScale);
 }
 
 function onFiltersChanged(): void {
@@ -665,7 +686,7 @@ function loadUserSettings(): void {
       if (typeof f.zoom === 'number')       state.userSettings.filters.zoom       = clamp(f.zoom, 1, 4);
       if (typeof f.panX === 'number')       state.userSettings.filters.panX       = clamp(f.panX, -100, 100);
       if (typeof f.panY === 'number')       state.userSettings.filters.panY       = clamp(f.panY, -100, 100);
-      if (typeof f.imgScale === 'number')   state.userSettings.filters.imgScale   = clamp(f.imgScale, 1, 4);
+      if (typeof f.imgBig === 'boolean')     state.userSettings.filters.imgBig     = f.imgBig;
     }
   } catch { /* ignore */ }
 }
@@ -915,11 +936,16 @@ function wireInteractions(): void {
     state.userSettings.filters.invert = invertToggle.checked;
     onFiltersChanged();
   });
-  imgscaleSlider.addEventListener('input', () => {
-    const snapped = snapImgScale(Number(imgscaleSlider.value));
-    imgscaleSlider.value = String(snapped);
-    state.userSettings.filters.imgScale = snapped;
-    imgscaleVal.textContent = imgScaleLabel(snapped);
+  imgSmallBtn.addEventListener('click', () => {
+    state.userSettings.filters.imgBig = false;
+    updateSliderDisplays();
+    updateHudPreviewLayout();
+    if (bridge && imageContainerActive) void setupGlassesPage(true);
+    persistUserSettings();
+  });
+  imgBigBtn.addEventListener('click', () => {
+    state.userSettings.filters.imgBig = true;
+    updateSliderDisplays();
     updateHudPreviewLayout();
     if (bridge && imageContainerActive) void setupGlassesPage(true);
     persistUserSettings();

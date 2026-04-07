@@ -351,3 +351,33 @@ input[type='checkbox'].invert-cb {
   height: 14px;
   cursor: pointer;
 }
+
+/* ── Img size toggle ────────────────────────────────────────────────────────── */
+
+.img-size-toggle {
+  display: flex;
+  gap: 6px;
+}
+
+.size-btn {
+  flex: 1;
+  border: 1px solid #3a4a3a;
+  background: #161616;
+  color: #8fa38f;
+  font-size: 0.72rem;
+  padding: 4px 0;
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: 'Consolas', monospace;
+}
+
+.size-btn:hover {
+  background: #1e2e1e;
+  color: #c8d8c8;
+}
+
+.size-btn--active {
+  border-color: #00ff3a;
+  background: #0d1f0d;
+  color: #00ff3a;
+}
