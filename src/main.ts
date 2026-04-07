@@ -868,10 +868,13 @@ async function initBridge(): Promise<void> {
 }
 
 async function resolveControlUrl(): Promise<void> {
-  // When served by Vite (dev/sim), window.location.hostname is 'localhost' or the
-  // LAN IP — already correct. Only fall back to host.json when the hostname is empty
-  // (packaged EHPK loaded from a file:// or opaque origin on the glasses).
-  if (window.location.hostname) return;
+  // When served by Vite (dev/sim) from a LAN IP, window.location.hostname is the
+  // PC's LAN IP — already correct, skip host.json.
+  // When EvenHub serves the EHPK on-device, hostname is '' / 'localhost' / '127.0.0.1'
+  // (device loopback) — must use host.json to reach the PC's control server.
+  const h = window.location.hostname;
+  const isLoopback = !h || h === 'localhost' || h === '127.0.0.1' || h === '[::1]';
+  if (!isLoopback) return;
   try {
     const r = await fetch('/host.json', { cache: 'no-store', signal: AbortSignal.timeout(2000) });
     if (r.ok) {
