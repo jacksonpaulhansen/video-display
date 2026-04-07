@@ -76,9 +76,30 @@ async function getCachedVideoData(youtubeDl, url) {
   return data;
 }
 
-const host = '127.0.0.1';
+const host = '0.0.0.0';
 const port = 8787;
 const projectRoot = process.cwd();
+
+// Determine PC's LAN IP and write it to public/host.json so the EHPK bundle
+// can reach the control server from the glasses over the local network.
+import os from 'node:os';
+function getLanIp() {
+  for (const ifaces of Object.values(os.networkInterfaces())) {
+    for (const iface of ifaces ?? []) {
+      if (iface.family === 'IPv4' && !iface.internal) return iface.address;
+    }
+  }
+  return '127.0.0.1';
+}
+const lanIp = getLanIp();
+try {
+  const publicDir = path.join(projectRoot, 'public');
+  if (!fs.existsSync(publicDir)) fs.mkdirSync(publicDir, { recursive: true });
+  fs.writeFileSync(path.join(publicDir, 'host.json'), JSON.stringify({ host: lanIp, port }));
+  console.log(`[control] LAN IP: ${lanIp} → public/host.json`);
+} catch (e) {
+  console.warn('[control] Could not write public/host.json:', e.message);
+}
 const apiVersion = '2026-03-22-publish-app-1';
 
 let publishRunning = false;
@@ -1065,7 +1086,7 @@ const server = http.createServer(async (req, res) => {
           title: data.title,
           author: data.author,
           lengthSeconds: data.lengthSeconds,
-          proxyUrl: `http://${host}:${port}/video-proxy?url=${encodeURIComponent(videoUrl)}`,
+          proxyUrl: `http://${req.headers.host || `${lanIp}:${port}`}/video-proxy?url=${encodeURIComponent(videoUrl)}`,
         });
       } catch (error) {
         sendJson(res, 500, { ok: false, error: String(error) });

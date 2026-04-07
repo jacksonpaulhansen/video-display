@@ -53,7 +53,7 @@ type AppState = {
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const CONTROL_URL = `http://${window.location.hostname}:8787`;
+let CONTROL_URL = `http://${window.location.hostname || 'localhost'}:8787`;
 const REQUIRED_CONTROL_CAPABILITY = 'publish-app';
 const HIDE_DEBUG_TOOLS = true;
 const DEV_TOOLS_TOGGLE_SHORTCUT = 'Ctrl+Shift+D';
@@ -867,6 +867,23 @@ async function initBridge(): Promise<void> {
   }
 }
 
+async function resolveControlUrl(): Promise<void> {
+  // When served by Vite (dev/sim), window.location.hostname is 'localhost' or the
+  // LAN IP — already correct. Only fall back to host.json when the hostname is empty
+  // (packaged EHPK loaded from a file:// or opaque origin on the glasses).
+  if (window.location.hostname) return;
+  try {
+    const r = await fetch('/host.json', { cache: 'no-store', signal: AbortSignal.timeout(2000) });
+    if (r.ok) {
+      const data = (await r.json()) as { host?: string; port?: number };
+      if (data.host) {
+        CONTROL_URL = `http://${data.host}:${data.port ?? 8787}`;
+        log(`Control URL from host.json: ${CONTROL_URL}`);
+      }
+    }
+  } catch { /* not available */ }
+}
+
 async function initControlHealth(): Promise<void> {
   try {
     const h = await fetch(`${CONTROL_URL}/health`, { cache: 'no-store' });
@@ -981,6 +998,7 @@ async function init(): Promise<void> {
   loadUserSettings();
   syncAllInputs();
   wireInteractions();
+  await resolveControlUrl();
   await initControlHealth();
   await initBridge();
   render();
