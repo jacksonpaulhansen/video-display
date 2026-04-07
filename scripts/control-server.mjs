@@ -3,6 +3,78 @@ import process from 'node:process';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import fs from 'node:fs';
+import { Readable } from 'node:stream';
+
+// Lazy-load youtube-dl-exec (wraps yt-dlp, auto-downloads binary on first use).
+// Server still starts if the package isn't installed — video proxy routes return 503.
+let _youtubeDl = undefined;
+async function loadYoutubeDl() {
+  if (_youtubeDl !== undefined) return _youtubeDl;
+  try {
+    const mod = await import('youtube-dl-exec');
+    _youtubeDl = mod.default;
+  } catch {
+    _youtubeDl = null;
+  }
+  return _youtubeDl;
+}
+
+// In-memory cache — YouTube CDN URLs are signed and expire (~6 h), TTL = 4 min
+const videoInfoCache = new Map();
+const VIDEO_INFO_TTL = 4 * 60 * 1000;
+
+async function getCachedVideoData(youtubeDl, url) {
+  const now = Date.now();
+  const cached = videoInfoCache.get(url);
+  if (cached && now < cached.expiresAt) return cached.data;
+
+  // --format tries a combined progressive stream ≤480p first (single URL, no mux needed).
+  // Falls back to best available if no combined stream exists.
+  const info = await youtubeDl(url, {
+    dumpSingleJson: true,
+    noWarnings: true,
+    noPlaylist: true,
+    format: 'best[height<=480][ext=mp4]/best[height<=480]/best',
+    noCheckCertificates: true,
+  });
+
+  // info.url = single combined stream URL (progressive formats)
+  // info.requested_formats = [videoFmt, audioFmt] for DASH (adaptive) formats
+  let directUrl = info.url || null;
+  let mimeType = info.ext === 'webm' ? 'video/webm' : 'video/mp4';
+
+  if (!directUrl && Array.isArray(info.requested_formats)) {
+    // DASH: proxy the video stream; browser gets video (may lack audio on DASH-only)
+    const videoFmt = info.requested_formats.find((f) => f.vcodec && f.vcodec !== 'none' && f.url);
+    if (videoFmt) {
+      directUrl = videoFmt.url;
+      mimeType = videoFmt.ext === 'webm' ? 'video/webm' : 'video/mp4';
+    }
+  }
+
+  if (!directUrl && Array.isArray(info.formats)) {
+    // Last resort: pick the best single format with a usable URL
+    const candidates = info.formats
+      .filter((f) => f.url && f.vcodec && f.vcodec !== 'none')
+      .sort((a, b) => (b.tbr || b.height || 0) - (a.tbr || a.height || 0));
+    if (candidates[0]) {
+      directUrl = candidates[0].url;
+      mimeType = candidates[0].ext === 'webm' ? 'video/webm' : 'video/mp4';
+    }
+  }
+
+  if (!directUrl) throw new Error('No streamable URL found in yt-dlp output');
+
+  const data = {
+    title: info.title ?? '',
+    author: info.uploader ?? info.channel ?? '',
+    lengthSeconds: String(info.duration ?? '0'),
+    directUrl,
+    mimeType,
+  };
+  videoInfoCache.set(url, { data, expiresAt: now + VIDEO_INFO_TTL });
+  return data;
+}
 
 const host = '127.0.0.1';
 const port = 8787;
@@ -674,7 +746,7 @@ const server = http.createServer(async (req, res) => {
       ok: true,
       service: 'control-server',
       version: apiVersion,
-      capabilities: ['publish', 'publish-app', 'reboot', 'link-git', 'switch-git-account', 'build-ehpk'],
+      capabilities: ['publish', 'publish-app', 'reboot', 'link-git', 'switch-git-account', 'build-ehpk', 'video-proxy'],
     });
     return;
   }
@@ -964,6 +1036,78 @@ const server = http.createServer(async (req, res) => {
       }
     });
     return;
+  }
+
+  // ── Video proxy ──────────────────────────────────────────────────────────────
+  // GET /video-info?url=<encoded>  — resolve video metadata + proxy URL
+  // GET /video-proxy?url=<encoded> — stream video with Range support
+  if (req.method === 'GET' && (req.url.startsWith('/video-info') || req.url.startsWith('/video-proxy'))) {
+    const parsedUrl = new URL(req.url, `http://${host}:${port}`);
+    const videoUrl = parsedUrl.searchParams.get('url');
+
+    if (!videoUrl) {
+      sendJson(res, 400, { ok: false, error: 'url parameter required' });
+      return;
+    }
+
+    const youtubeDl = await loadYoutubeDl();
+    if (!youtubeDl) {
+      sendJson(res, 503, { ok: false, error: 'youtube-dl-exec not available — run: npm install youtube-dl-exec' });
+      return;
+    }
+
+    // /video-info — return metadata and proxy URL
+    if (parsedUrl.pathname === '/video-info') {
+      try {
+        const data = await getCachedVideoData(youtubeDl, videoUrl);
+        sendJson(res, 200, {
+          ok: true,
+          title: data.title,
+          author: data.author,
+          lengthSeconds: data.lengthSeconds,
+          proxyUrl: `http://${host}:${port}/video-proxy?url=${encodeURIComponent(videoUrl)}`,
+        });
+      } catch (error) {
+        sendJson(res, 500, { ok: false, error: String(error) });
+      }
+      return;
+    }
+
+    // /video-proxy — stream the video with CORS + Range support
+    if (parsedUrl.pathname === '/video-proxy') {
+      try {
+        const data = await getCachedVideoData(youtubeDl, videoUrl);
+        const { directUrl, mimeType } = data;
+
+        const rangeHeader = req.headers['range'];
+        const upstreamHeaders = {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Referer': 'https://www.youtube.com/',
+          'Origin': 'https://www.youtube.com',
+        };
+        if (rangeHeader) upstreamHeaders['Range'] = rangeHeader;
+
+        const upstream = await fetch(directUrl, { headers: upstreamHeaders });
+
+        const resHeaders = {
+          'Access-Control-Allow-Origin': '*',
+          'Content-Type': mimeType,
+          'Accept-Ranges': 'bytes',
+        };
+
+        const contentLength = upstream.headers.get('Content-Length');
+        const contentRange = upstream.headers.get('Content-Range');
+        if (contentLength) resHeaders['Content-Length'] = contentLength;
+        if (contentRange) resHeaders['Content-Range'] = contentRange;
+
+        res.writeHead(upstream.status === 206 ? 206 : 200, resHeaders);
+        Readable.fromWeb(upstream.body).pipe(res);
+        req.on('close', () => res.destroy());
+      } catch (error) {
+        if (!res.headersSent) sendJson(res, 500, { ok: false, error: String(error) });
+      }
+      return;
+    }
   }
 
   sendJson(res, 404, { ok: false, error: 'Not found' });

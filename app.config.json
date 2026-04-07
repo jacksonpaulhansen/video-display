@@ -1,16 +1,16 @@
 {
   "github": {
     "owner": "jacksonpaulhansen",
-    "repo": "er-settings",
+    "repo": "video-display",
     "pat": ""
   },
-  "appName": "ER-Settings",
-  "publishUrl": "https://jacksonpaulhansen.github.io/er-settings/",
+  "appName": "video-display",
+  "publishUrl": "https://jacksonpaulhansen.github.io/video-display/",
   "git": {
     "enabled": true,
     "userName": "jacksonpaulhansen",
     "userEmail": "270181675+jacksonpaulhansen@users.noreply.github.com",
-    "remoteUrl": "https://github.com/jacksonpaulhansen/er-settings.git",
+    "remoteUrl": "https://github.com/jacksonpaulhansen/video-display.git",
     "branch": "main",
     "commitMessagePrefix": "publish",
     "autoSetGithubPagesUrl": true,
@@ -21,7 +21,7 @@
       }
     ],
     "repos": [
-      "https://github.com/jacksonpaulhansen/er-settings.git"
+      "https://github.com/jacksonpaulhansen/video-display.git"
     ],
     "deployed": false
   }

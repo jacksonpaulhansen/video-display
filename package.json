@@ -17,7 +17,9 @@
     "vite": "^8.0.1"
   },
   "dependencies": {
+    "@distube/ytdl-core": "^4.16.12",
     "@evenrealities/even_hub_sdk": "^0.0.7",
-    "qrcode": "^1.5.4"
+    "qrcode": "^1.5.4",
+    "youtube-dl-exec": "^3.1.4"
   }
 }

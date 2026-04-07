@@ -2,219 +2,196 @@ import './style.css';
 import {
   CreateStartUpPageContainer,
   type EvenAppBridge,
+  ImageContainerProperty,
+  ImageRawDataUpdate,
+  ImageRawDataUpdateResult,
   OsEventTypeList,
   RebuildPageContainer,
-  TextContainerProperty,
-  TextContainerUpgrade,
   waitForEvenAppBridge,
 } from '@evenrealities/even_hub_sdk';
 
-type InputAction = 'CLICK' | 'UP' | 'DOWN' | 'DOUBLE_CLICK';
-type NavigationScope = 'SECTION_LIST' | 'DETAIL';
+// ── Types ─────────────────────────────────────────────────────────────────────
+
 type PublishStatus = 'IDLE' | 'RUNNING' | 'PACKING' | 'DONE' | 'FAILED';
+type VideoPlatform = 'youtube' | 'direct' | 'iframe' | null;
 
-const SETTINGS_SECTIONS = [
-  'HOME',
-  'DEVICE_INFO',
-  'DISPLAY_HUD',
-  'MENU_EDITOR',
-  'MIC_TEST',
-  'IMU_VIEWER',
-  'CONNECTION_HELP',
-  'APP_PREFERENCES',
-  'ABOUT_EXIT',
-] as const;
-type SettingsSection = (typeof SETTINGS_SECTIONS)[number];
-
-type MenuPreferenceItem = {
-  id: string;
-  label: string;
-  enabled: boolean;
+type BridgeExtras = EvenAppBridge & {
+  shutDownPageContainer?: (confirmMode: number) => Promise<unknown>;
 };
 
-type PreferencesState = {
-  showConnectionTips: boolean;
-  compactHud: boolean;
-  headsUpEnabled: boolean;
-  autoDisplayEnabled: boolean;
-  brightnessLevel: number;
-  menuItems: MenuPreferenceItem[];
+type ImageFilters = {
+  brightness: number; // -100 … 100, 0 = normal
+  contrast: number;   // -100 … 100, 0 = normal
+  invert: boolean;
+  zoom: number;       // 1.0 … 4.0
+  panX: number;       // -100 … 100, 0 = center
+  panY: number;       // -100 … 100, 0 = center
+  imgScale: number;   // 1.0 … 4.0, physical display size on glasses
 };
 
-type ImuVector = {
-  x: number;
-  y: number;
-  z: number;
+type UserSettings = {
+  fps: number;
+  autoplay: boolean;
+  muted: boolean;
+  filters: ImageFilters;
 };
 
-type SettingsState = {
-  sectionIndex: number;
-  navigationScope: NavigationScope;
-  detailIndex: number;
-  micActive: boolean;
-  imuActive: boolean;
-  imuPaceIndex: number;
-  imuVector: ImuVector | null;
-  menuEditorIndex: number;
-};
-
-type DeviceSnapshot = {
-  connectionState: 'CONNECTED' | 'DISCONNECTED';
-  glassesBatteryPct: number | null;
-  ringBatteryPct: number | null;
-  wearing: boolean | null;
-  charging: boolean | null;
-  inCase: boolean | null;
-  model: string;
-  serial: string;
-  firmware: string;
-  userName: string;
-  uid: string;
-  country: string;
-};
-
-type CapabilityState = {
-  bridgeConnected: boolean;
-  hasDeviceInfo: boolean;
-  hasUserInfo: boolean;
-  micAvailable: boolean;
-  imuAvailable: boolean;
-  canExit: boolean;
-  canPersistBridgeStorage: boolean;
+type VideoState = {
+  inputUrl: string;
+  embedUrl: string | null;
+  platform: VideoPlatform;
+  loaded: boolean;
 };
 
 type AppState = {
   publishStatus: PublishStatus;
   deployed: boolean;
-  lastAction: string;
-  settings: SettingsState;
-  preferences: PreferencesState;
-  device: DeviceSnapshot;
-  capabilities: CapabilityState;
+  video: VideoState;
+  userSettings: UserSettings;
+  bridgeConnected: boolean;
 };
 
-type SectionControl = {
-  label: string;
-  disabled?: boolean;
-};
+// ── Constants ─────────────────────────────────────────────────────────────────
 
-type SectionView = {
-  title: string;
-  lines: string[];
-  controls: SectionControl[];
-};
-
-type BridgeExtras = EvenAppBridge & {
-  getDeviceInfo?: () => Promise<unknown>;
-  getUserInfo?: () => Promise<unknown>;
-  onDeviceStatusChanged?: (callback: (payload: unknown) => void) => void;
-  audioControl?: (enabled: boolean) => Promise<unknown>;
-  imuControl?: (enabled: boolean, pace?: unknown) => Promise<unknown>;
-  shutDownPageContainer?: (confirmMode: number) => Promise<unknown>;
-  getLocalStorage?: (key: string) => Promise<unknown>;
-  setLocalStorage?: (key: string, value: string) => Promise<unknown>;
-};
-
-const SECTIONS_CONTAINER_ID = 1;
-const SECTIONS_CONTAINER_NAME = 'sectionsText';
-const DETAILS_CONTAINER_ID = 2;
-const DETAILS_CONTAINER_NAME = 'detailsText';
 const CONTROL_URL = 'http://127.0.0.1:8787';
 const REQUIRED_CONTROL_CAPABILITY = 'publish-app';
-const DISPLAY_WIDTH = 576;
-const MAIN_PANEL_X = 24;
-const MAIN_PANEL_WIDTH = 528;
-const HUD_COLUMN_GAP = 8;
-const LEFT_PANEL_WIDTH = 180;
-const RIGHT_PANEL_X = MAIN_PANEL_X + LEFT_PANEL_WIDTH + HUD_COLUMN_GAP;
-const RIGHT_PANEL_WIDTH = MAIN_PANEL_WIDTH - LEFT_PANEL_WIDTH - HUD_COLUMN_GAP;
 const HIDE_DEBUG_TOOLS = true;
 const DEV_TOOLS_TOGGLE_SHORTCUT = 'Ctrl+Shift+D';
 const MAX_APP_NAME_LENGTH = 20;
-const BROWSER_STORAGE_KEY = 'even-g2-settings:v1';
-const BRIDGE_STORAGE_KEY = 'even-g2-settings:v1';
-const IMU_PACE_OPTIONS = ['P100', 'P200', 'P300', 'P400', 'P500', 'P600', 'P700', 'P800', 'P900', 'P1000'] as const;
+
+// Glasses image container — SDK max: 200×100 px
+const IMAGE_CONTAINER_ID = 1;
+const IMAGE_CONTAINER_NAME = 'videoFrame';
+const IMAGE_W = 178; // 16:9 ratio at 100 px tall
+const IMAGE_H = 100;
+
+const BROWSER_STORAGE_KEY = 'video-display:v2';
+const DEFAULT_FPS = 30;
+const MIN_FPS = 1;
+const MAX_FPS = 60;
+
+const DEFAULT_FILTERS: ImageFilters = {
+  brightness: 0,
+  contrast: 0,
+  invert: false,
+  zoom: 1,
+  panX: 0,
+  panY: 0,
+  imgScale: 1,
+};
+
+// ── State ─────────────────────────────────────────────────────────────────────
 
 const state: AppState = {
   publishStatus: 'IDLE',
   deployed: false,
-  lastAction: 'Ready',
-  settings: {
-    sectionIndex: 0,
-    navigationScope: 'SECTION_LIST',
-    detailIndex: 0,
-    micActive: false,
-    imuActive: false,
-    imuPaceIndex: 4,
-    imuVector: null,
-    menuEditorIndex: 0,
+  video: { inputUrl: '', embedUrl: null, platform: null, loaded: false },
+  userSettings: {
+    fps: DEFAULT_FPS,
+    autoplay: false,
+    muted: true,
+    filters: { ...DEFAULT_FILTERS },
   },
-  preferences: {
-    showConnectionTips: true,
-    compactHud: false,
-    headsUpEnabled: true,
-    autoDisplayEnabled: false,
-    brightnessLevel: 7,
-    menuItems: [],
-  },
-  device: {
-    connectionState: 'DISCONNECTED',
-    glassesBatteryPct: null,
-    ringBatteryPct: null,
-    wearing: null,
-    charging: null,
-    inCase: null,
-    model: 'Unknown',
-    serial: 'Unknown',
-    firmware: 'Unknown',
-    userName: 'Unknown',
-    uid: 'Unknown',
-    country: 'Unknown',
-  },
-  capabilities: {
-    bridgeConnected: false,
-    hasDeviceInfo: false,
-    hasUserInfo: false,
-    micAvailable: false,
-    imuAvailable: false,
-    canExit: false,
-    canPersistBridgeStorage: false,
-  },
+  bridgeConnected: false,
 };
 
 let bridge: EvenAppBridge | null = null;
 let startupCreated = false;
-let lastResolvedAction: InputAction | null = null;
-let lastResolvedActionAt = 0;
-let lastEventSignature = '';
-let lastEventAt = 0;
-let lastEventLabel = '';
+let imageContainerActive = false;
 let debugToolsVisible = !HIDE_DEBUG_TOOLS;
+
+// Frame capture
+let isTransmittingFrame = false;
+let frameIntervalId: ReturnType<typeof setInterval> | null = null;
+let _frameLoggedSkip = false;
+const captureCanvas = document.createElement('canvas');
+captureCanvas.width = IMAGE_W;
+captureCanvas.height = IMAGE_H;
+const captureCtx = captureCanvas.getContext('2d')!;
+
+// Reusable video element
+const videoEl = document.createElement('video');
+videoEl.crossOrigin = 'anonymous';
+videoEl.preload = 'auto';
+
+// Diagnostic log
+const eventLines: string[] = [];
+let lastEventAt = 0;
+let lastEventSignature = '';
+let lastEventLabel = '';
+
+// ── DOM ───────────────────────────────────────────────────────────────────────
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('Missing #app root element');
 
-function requireElement<T extends Element>(value: T | null, name: string): T {
-  if (!value) throw new Error(`Missing ${name}`);
-  return value;
+function requireElement<T extends Element>(v: T | null, name: string): T {
+  if (!v) throw new Error(`Missing ${name}`);
+  return v;
 }
 
 app.innerHTML = `
   <main class="hud-shell">
+
     <fieldset class="group-box">
-      <legend>Even G2 Setup</legend>
-      <div class="setup-shell">
-        <div class="setup-sections">
-          <div class="pane-title">Sections</div>
-          <div id="setup-sections" class="setup-list"></div>
+      <legend>Video Display</legend>
+      <div class="url-row">
+        <div class="mini-field url-field">
+          <label>Video URL</label>
+          <input id="video-url-input" type="text" placeholder="YouTube URL or direct .mp4/.webm link" />
         </div>
-        <div class="setup-detail">
-          <div class="pane-title">Detail</div>
-          <div id="setup-detail" class="detail-card"></div>
-        </div>
+        <button id="load-video-btn" type="button">Load</button>
+        <button id="clear-video-btn" type="button">Clear</button>
       </div>
-      <p class="hint">Gesture mapping: Up/Down navigate, Click select/toggle, Double-click back</p>
-      <p class="hint">Mic Test + IMU Viewer require connected hardware in this browser/offline mode</p>
+      <div id="video-container" class="video-container">
+        <div class="video-placeholder">Enter a video URL above and click Load</div>
+      </div>
+      <p id="glasses-status" class="hint"></p>
+    </fieldset>
+
+    <fieldset class="group-box">
+      <legend>User Settings</legend>
+      <div class="settings-row">
+        <div class="mini-field">
+          <label>FPS</label>
+          <input id="fps-input" type="number" min="${MIN_FPS}" max="${MAX_FPS}" value="${DEFAULT_FPS}" />
+          <span class="field-unit">fps</span>
+        </div>
+        <label class="toggle-label"><input id="autoplay-toggle" type="checkbox" /> Autoplay</label>
+        <label class="toggle-label"><input id="muted-toggle" type="checkbox" checked /> Muted</label>
+      </div>
+      <div class="slider-grid">
+        <button class="slider-lbl" data-target="brightness-slider" data-default="0">Brightness</button>
+        <input type="range" id="brightness-slider" min="-100" max="100" value="0" step="1" />
+        <span class="slider-val" id="brightness-val">0</span>
+
+        <button class="slider-lbl" data-target="contrast-slider" data-default="0">Contrast</button>
+        <input type="range" id="contrast-slider" min="-100" max="100" value="0" step="1" />
+        <span class="slider-val" id="contrast-val">0</span>
+
+        <label class="toggle-label slider-full"><input id="invert-toggle" type="checkbox" /> Invert</label>
+
+        <button class="slider-lbl" data-target="zoom-slider" data-default="1">Zoom</button>
+        <input type="range" id="zoom-slider" min="1" max="4" value="1" step="0.05" />
+        <span class="slider-val" id="zoom-val">1.0×</span>
+
+        <button class="slider-lbl" data-target="panx-slider" data-default="0">L / R</button>
+        <input type="range" id="panx-slider" min="-100" max="100" value="0" step="1" />
+        <span class="slider-val" id="panx-val">0</span>
+
+        <button class="slider-lbl" data-target="pany-slider" data-default="0">U / D</button>
+        <input type="range" id="pany-slider" min="-100" max="100" value="0" step="1" />
+        <span class="slider-val" id="pany-val">0</span>
+
+        <button class="slider-lbl" data-target="imgscale-slider" data-default="1">Img Size</button>
+        <input type="range" id="imgscale-slider" min="1" max="4" value="1" step="any" list="imgscale-ticks" />
+        <span class="slider-val" id="imgscale-val">1×</span>
+        <datalist id="imgscale-ticks">
+          <option value="1"></option>
+          <option value="2.88"></option>
+          <option value="3.24"></option>
+        </datalist>
+      </div>
     </fieldset>
 
     <fieldset id="debug-tools" class="group-box" ${HIDE_DEBUG_TOOLS ? 'style="display:none;"' : ''}>
@@ -226,1144 +203,761 @@ app.innerHTML = `
       </div>
       <pre id="event-log" class="event-log"></pre>
       <pre id="publish-log" class="publish-log"></pre>
-
       <div class="sim-display">
-        <pre id="hud-main-preview" class="hud-preview hud-preview-main"></pre>
-        <pre id="hud-detail-preview" class="hud-preview hud-preview-detail"></pre>
+        <canvas id="hud-image-preview" class="hud-image-preview"></canvas>
       </div>
-      <p class="hint">Keyboard simulation: Enter=Click, Arrow Up/Down, D=Double-click</p>
+      <p class="hint">Toggle: ${DEV_TOOLS_TOGGLE_SHORTCUT}</p>
     </fieldset>
+
   </main>
 `;
 
-const setupSectionsRoot = requireElement(document.querySelector<HTMLDivElement>('#setup-sections'), '#setup-sections');
-const setupDetailRoot = requireElement(document.querySelector<HTMLDivElement>('#setup-detail'), '#setup-detail');
-const hudMainPreview = requireElement(document.querySelector<HTMLPreElement>('#hud-main-preview'), '#hud-main-preview');
-const hudDetailPreview = requireElement(document.querySelector<HTMLPreElement>('#hud-detail-preview'), '#hud-detail-preview');
-const publishBtn = requireElement(document.querySelector<HTMLButtonElement>('#publish-btn'), '#publish-btn');
-const ehpkBtn = requireElement(document.querySelector<HTMLButtonElement>('#ehpk-btn'), '#ehpk-btn');
+const videoUrlInput  = requireElement(document.querySelector<HTMLInputElement>('#video-url-input'), '#video-url-input');
+const loadVideoBtn   = requireElement(document.querySelector<HTMLButtonElement>('#load-video-btn'), '#load-video-btn');
+const clearVideoBtn  = requireElement(document.querySelector<HTMLButtonElement>('#clear-video-btn'), '#clear-video-btn');
+const videoContainer = requireElement(document.querySelector<HTMLDivElement>('#video-container'), '#video-container');
+const glassesStatus  = requireElement(document.querySelector<HTMLParagraphElement>('#glasses-status'), '#glasses-status');
+const fpsInput       = requireElement(document.querySelector<HTMLInputElement>('#fps-input'), '#fps-input');
+const autoplayToggle = requireElement(document.querySelector<HTMLInputElement>('#autoplay-toggle'), '#autoplay-toggle');
+const mutedToggle    = requireElement(document.querySelector<HTMLInputElement>('#muted-toggle'), '#muted-toggle');
+const invertToggle   = requireElement(document.querySelector<HTMLInputElement>('#invert-toggle'), '#invert-toggle');
+
+// Sliders
+const brightnessSlider = requireElement(document.querySelector<HTMLInputElement>('#brightness-slider'), '#brightness-slider');
+const contrastSlider   = requireElement(document.querySelector<HTMLInputElement>('#contrast-slider'), '#contrast-slider');
+const zoomSlider       = requireElement(document.querySelector<HTMLInputElement>('#zoom-slider'), '#zoom-slider');
+const panxSlider       = requireElement(document.querySelector<HTMLInputElement>('#panx-slider'), '#panx-slider');
+const panySlider       = requireElement(document.querySelector<HTMLInputElement>('#pany-slider'), '#pany-slider');
+const brightnessVal    = requireElement(document.querySelector<HTMLSpanElement>('#brightness-val'), '#brightness-val');
+const contrastVal      = requireElement(document.querySelector<HTMLSpanElement>('#contrast-val'), '#contrast-val');
+const zoomVal          = requireElement(document.querySelector<HTMLSpanElement>('#zoom-val'), '#zoom-val');
+const panxVal          = requireElement(document.querySelector<HTMLSpanElement>('#panx-val'), '#panx-val');
+const panyVal          = requireElement(document.querySelector<HTMLSpanElement>('#pany-val'), '#pany-val');
+const imgscaleSlider   = requireElement(document.querySelector<HTMLInputElement>('#imgscale-slider'), '#imgscale-slider');
+const imgscaleVal      = requireElement(document.querySelector<HTMLSpanElement>('#imgscale-val'), '#imgscale-val');
+
+const publishBtn         = requireElement(document.querySelector<HTMLButtonElement>('#publish-btn'), '#publish-btn');
+const ehpkBtn            = requireElement(document.querySelector<HTMLButtonElement>('#ehpk-btn'), '#ehpk-btn');
 const debugToolsFieldset = requireElement(document.querySelector<HTMLElement>('#debug-tools'), '#debug-tools');
-const publishStatus = requireElement(document.querySelector<HTMLSpanElement>('#publish-status'), '#publish-status');
-const eventLog = requireElement(document.querySelector<HTMLPreElement>('#event-log'), '#event-log');
-const publishLog = requireElement(document.querySelector<HTMLPreElement>('#publish-log'), '#publish-log');
+const publishStatus      = requireElement(document.querySelector<HTMLSpanElement>('#publish-status'), '#publish-status');
+const eventLog           = requireElement(document.querySelector<HTMLPreElement>('#event-log'), '#event-log');
+const publishLog         = requireElement(document.querySelector<HTMLPreElement>('#publish-log'), '#publish-log');
+const hudImagePreview    = requireElement(document.querySelector<HTMLCanvasElement>('#hud-image-preview'), '#hud-image-preview');
 
-const eventLines: string[] = [];
-const leftPanelLeftPercent = (MAIN_PANEL_X / DISPLAY_WIDTH) * 100;
-const leftPanelWidthPercent = (LEFT_PANEL_WIDTH / DISPLAY_WIDTH) * 100;
-const rightPanelLeftPercent = (RIGHT_PANEL_X / DISPLAY_WIDTH) * 100;
-const rightPanelWidthPercent = (RIGHT_PANEL_WIDTH / DISPLAY_WIDTH) * 100;
-hudMainPreview.style.left = `${leftPanelLeftPercent}%`;
-hudMainPreview.style.width = `${leftPanelWidthPercent}%`;
-hudDetailPreview.style.left = `${rightPanelLeftPercent}%`;
-hudDetailPreview.style.width = `${rightPanelWidthPercent}%`;
+// Size the HUD image preview to fill the sim-display proportionally
+hudImagePreview.width  = IMAGE_W;
+hudImagePreview.height = IMAGE_H;
 
-function asBridgeExtras(): BridgeExtras | null {
-  return bridge as BridgeExtras | null;
+function computeImgDisplaySize(): { w: number; h: number; x: number; y: number } {
+  const scale = state.userSettings.filters.imgScale;
+  const w = Math.min(Math.round(IMAGE_W * scale), 576);
+  const h = Math.min(Math.round(IMAGE_H * scale), 288);
+  return { w, h, x: Math.round((576 - w) / 2), y: Math.round((288 - h) / 2) };
 }
 
-function clampInt(value: number, min: number, max: number): number {
-  if (!Number.isFinite(value)) return min;
-  return Math.max(min, Math.min(max, Math.trunc(value)));
+function updateHudPreviewLayout(): void {
+  const { w, h, x, y } = computeImgDisplaySize();
+  hudImagePreview.style.cssText =
+    `position:absolute;` +
+    `left:${(x / 576) * 100}%;` +
+    `top:${(y / 288) * 100}%;` +
+    `width:${(w / 576) * 100}%;` +
+    `height:${(h / 288) * 100}%;` +
+    `border:1px solid rgba(0,200,255,0.4);` +
+    `image-rendering:pixelated;`;
 }
 
-function clampAppName(value: string): string {
-  return String(value || '').trim().slice(0, MAX_APP_NAME_LENGTH);
+updateHudPreviewLayout();
+
+// ── Diagnostic log ────────────────────────────────────────────────────────────
+
+function log(line: string): void {
+  const ts = new Date().toLocaleTimeString();
+  eventLines.push(`${ts}  ${line}`);
+  while (eventLines.length > 40) eventLines.shift();
+  eventLog.textContent = eventLines.join('\n');
+  eventLog.scrollTop = eventLog.scrollHeight;
+  console.log(`[video-display] ${line}`);
 }
 
-function sectionLabel(section: SettingsSection): string {
-  if (section === 'HOME') return 'Home';
-  if (section === 'DEVICE_INFO') return 'Device Info';
-  if (section === 'DISPLAY_HUD') return 'Display & HUD';
-  if (section === 'MENU_EDITOR') return 'Menu Editor';
-  if (section === 'MIC_TEST') return 'Mic Test';
-  if (section === 'IMU_VIEWER') return 'IMU (Motions)';
-  if (section === 'CONNECTION_HELP') return 'Connection Help';
-  if (section === 'APP_PREFERENCES') return 'App Preferences';
-  return 'About / Exit';
-}
+// ── URL helpers ───────────────────────────────────────────────────────────────
 
-function boolText(value: boolean | null): string {
-  if (value === null) return '---';
-  return value ? 'yes' : ' no';
-}
-
-function pctText(value: number | null): string {
-  if (value === null || !Number.isFinite(value)) return '---';
-  return `${Math.round(value)}%`;
-}
-
-function safeString(value: unknown, fallback = 'Unknown'): string {
-  if (typeof value === 'string') {
-    const cleaned = value.trim();
-    return cleaned || fallback;
-  }
-  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
-  return fallback;
-}
-
-function readNested(obj: Record<string, unknown>, keys: string[]): unknown {
-  for (const key of keys) {
-    if (key in obj && obj[key] !== undefined && obj[key] !== null) return obj[key];
-  }
-  return null;
-}
-
-function toNumberOrNull(value: unknown): number | null {
-  if (typeof value === 'number' && Number.isFinite(value)) return value;
-  if (typeof value === 'string') {
-    const parsed = Number(value);
-    if (Number.isFinite(parsed)) return parsed;
-  }
-  return null;
-}
-
-function toBoolOrNull(value: unknown): boolean | null {
-  if (typeof value === 'boolean') return value;
-  if (typeof value === 'number') return value !== 0;
-  if (typeof value === 'string') {
-    const normalized = value.trim().toLowerCase();
-    if (normalized === 'true' || normalized === 'on' || normalized === 'yes' || normalized === '1') return true;
-    if (normalized === 'false' || normalized === 'off' || normalized === 'no' || normalized === '0') return false;
-  }
-  return null;
-}
-
-function getCurrentSection(): SettingsSection {
-  return SETTINGS_SECTIONS[clampInt(state.settings.sectionIndex, 0, SETTINGS_SECTIONS.length - 1)];
-}
-
-function getSectionView(section: SettingsSection): SectionView {
-  if (section === 'HOME') {
-    const lines = [
-      `Connection: ${state.device.connectionState}`,
-      `Wearing: ${boolText(state.device.wearing)}     In Case: ${boolText(state.device.inCase)}`,
-      `Charging: ${boolText(state.device.charging)}`,
-      `Batt Glasses: ${pctText(state.device.glassesBatteryPct)}     Ring: ${pctText(state.device.ringBatteryPct)}`,
-    ];
-    return {
-      title: 'Home',
-      lines,
-      controls: [
-        { label: 'Refresh Device Snapshot', disabled: !state.capabilities.hasDeviceInfo },
-        { label: 'Restart Phone Connection (Pending SDK)', disabled: true },
-      ],
-    };
-  }
-
-  if (section === 'DEVICE_INFO') {
-    return {
-      title: 'Device Info',
-      lines: [
-        `Model: ${state.device.model}`,
-        `Serial: ${state.device.serial}`,
-        `Firmware: ${state.device.firmware}`,
-        `User: ${state.device.userName}`,
-        `UID: ${state.device.uid}`,
-        `Country: ${state.device.country}`,
-      ],
-      controls: [],
-    };
-  }
-
-  if (section === 'DISPLAY_HUD') {
-    return {
-      title: 'Display & HUD',
-      lines: [
-        `Brightness: ${state.preferences.brightnessLevel}/10`,
-        `Heads-up Display: ${state.preferences.headsUpEnabled ? 'On' : 'Off'}`,
-        `Auto Display Off: ${state.preferences.autoDisplayEnabled ? 'No' : 'Yes'}`,
-      ],
-      controls: [
-        { label: 'Brightness (Pending SDK)', disabled: true },
-        { label: 'Toggle Heads-up Display' },
-        { label: 'Toggle Auto Display Off' },
-      ],
-    };
-  }
-
-  if (section === 'MENU_EDITOR') {
-    return {
-      title: 'Menu Editor',
-      lines: [
-        'SDK cannot read phone launcher menu yet.',
-        'Menu edit will be enabled when SDK supports it.',
-      ],
-      controls: [{ label: 'Pending SDK', disabled: true }],
-    };
-  }
-
-  if (section === 'MIC_TEST') {
-    const unavailable = !state.capabilities.micAvailable;
-    return {
-      title: 'Mic Test',
-      lines: unavailable
-        ? ['Hardware required.', 'Connect glasses/ring via Even Hub to enable microphone control.']
-        : [
-            `Status: ${state.settings.micActive ? 'Capturing audio' : 'Idle'}`,
-            'PCM stream: 16kHz, signed 16-bit, little-endian, mono.',
-          ],
-      controls: [{ label: state.settings.micActive ? 'Stop Mic Capture' : 'Start Mic Capture', disabled: unavailable }],
-    };
-  }
-
-  if (section === 'IMU_VIEWER') {
-    const unavailable = !state.capabilities.imuAvailable;
-    const vector = state.settings.imuVector;
-    return {
-      title: 'IMU Viewer',
-      lines: unavailable
-        ? ['IMU = Inertial Measurement Unit.', 'Hardware required.', 'Connect glasses/ring via Even Hub to enable IMU controls.']
-        : [
-            'IMU = Inertial Measurement Unit.',
-            `Status: ${state.settings.imuActive ? 'Streaming' : 'Idle'}`,
-            `Pace: ${IMU_PACE_OPTIONS[state.settings.imuPaceIndex]}`,
-            `X: ${vector ? vector.x.toFixed(2) : 'n/a'}`,
-            `Y: ${vector ? vector.y.toFixed(2) : 'n/a'}`,
-            `Z: ${vector ? vector.z.toFixed(2) : 'n/a'}`,
-          ],
-      controls: [
-        { label: `Cycle Pace (${IMU_PACE_OPTIONS[state.settings.imuPaceIndex]})`, disabled: unavailable },
-        { label: state.settings.imuActive ? 'Stop IMU Stream' : 'Start IMU Stream', disabled: unavailable },
-      ],
-    };
-  }
-
-  if (section === 'CONNECTION_HELP') {
-    return {
-      title: 'Connection Help',
-      lines: [
-        'If BLE drops: app session ends.',
-        'Reconnect is not SDK-controlled.',
-        'Glasses restart: tap each temple 5 times rapidly.',
-        'Ring restart: place on charger and tap ring touchpad 5 times.',
-      ],
-      controls: [],
-    };
-  }
-
-  if (section === 'APP_PREFERENCES') {
-    return {
-      title: 'App Preferences',
-      lines: [
-        `Show Connection Tips: ${state.preferences.showConnectionTips ? 'On' : 'Off'}`,
-        `Compact HUD: ${state.preferences.compactHud ? 'On' : 'Off'}`,
-      ],
-      controls: [{ label: 'Toggle Connection Tips' }, { label: 'Toggle Compact HUD' }],
-    };
-  }
-
-  return {
-    title: 'About / Exit',
-    lines: [
-      'Even G2 Settings App v1',
-      `Bridge: ${state.capabilities.bridgeConnected ? 'connected' : 'offline browser mode'}`,
-    ],
-    controls: [{ label: 'Exit App', disabled: !state.capabilities.canExit }],
-  };
-}
-
-function controlCount(section: SettingsSection): number {
-  return getSectionView(section).controls.length;
-}
-
-function clampDetailIndex(): void {
-  const section = getCurrentSection();
-  const max = Math.max(0, controlCount(section) - 1);
-  state.settings.detailIndex = clampInt(state.settings.detailIndex, 0, max);
-}
-
-function trimToWidth(text: string, width: number): string {
-  if (text.length <= width) return text;
-  if (width <= 3) return text.slice(0, width);
-  return `${text.slice(0, width - 3)}...`;
-}
-
-function buildSectionsHudText(): string {
-  const lines: string[] = ['SECTIONS'];
-  for (let index = 0; index < SETTINGS_SECTIONS.length; index += 1) {
-    const item = SETTINGS_SECTIONS[index];
-    const isSelected = index === state.settings.sectionIndex;
-    const cursor =
-      isSelected && state.settings.navigationScope === 'DETAIL'
-        ? '▶'
-        : state.settings.navigationScope === 'SECTION_LIST' && isSelected
-          ? '▷'
-          : ' ';
-    lines.push(`${cursor} ${sectionLabel(item)}`);
-  }
-  return lines.map((line) => trimToWidth(line, 28)).join('\n').slice(0, 1900);
-}
-
-function buildDetailsHudText(): string {
-  const section = getCurrentSection();
-  const view = getSectionView(section);
-  const lines: string[] = [`${view.title} Details`];
-  for (const line of view.lines.slice(0, state.preferences.compactHud ? 4 : 6)) {
-    lines.push(`- ${line}`);
-  }
-  lines.push('');
-  if (view.controls.length === 0) {
-    lines.push('Controls: none');
-  } else {
-    lines.push('Controls:');
-    for (let index = 0; index < view.controls.length; index += 1) {
-      const control = view.controls[index];
-      const cursor = state.settings.navigationScope === 'DETAIL' && index === state.settings.detailIndex ? '▷' : ' ';
-      const disabled = control.disabled ? ' [disabled]' : '';
-      lines.push(`${cursor} ${index + 1}. ${control.label}${disabled}`);
+function parseYoutubeId(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.replace(/^www\./, '').replace(/^m\./, '');
+    if (host === 'youtube.com') {
+      const v = parsed.searchParams.get('v');
+      if (v) return v;
+      const match = parsed.pathname.match(/\/(?:embed|shorts|v)\/([^/?&#]+)/);
+      return match?.[1] ?? null;
     }
-  }
-  return lines.map((line) => trimToWidth(line, 52)).join('\n').slice(0, 1900);
+    if (host === 'youtu.be') return parsed.pathname.slice(1).split('?')[0] || null;
+  } catch { /* ignore */ }
+  return null;
 }
 
-async function pushHudToEvenHub(): Promise<void> {
-  if (!bridge || !startupCreated) return;
-  const leftContent = buildSectionsHudText();
-  const rightContent = buildDetailsHudText();
-  await bridge.textContainerUpgrade(
-    new TextContainerUpgrade({
-      containerID: SECTIONS_CONTAINER_ID,
-      containerName: SECTIONS_CONTAINER_NAME,
-      contentOffset: 0,
-      contentLength: leftContent.length,
-      content: leftContent,
-    }),
-  );
-  await bridge.textContainerUpgrade(
-    new TextContainerUpgrade({
-      containerID: DETAILS_CONTAINER_ID,
-      containerName: DETAILS_CONTAINER_NAME,
-      contentOffset: 0,
-      contentLength: rightContent.length,
-      content: rightContent,
-    }),
-  );
-}
-
-function renderSetupSections(): void {
-  const rows = SETTINGS_SECTIONS.map((section, index) => {
-    const isSelected = index === state.settings.sectionIndex;
-    const classes = ['setup-list-item'];
-    if (isSelected) classes.push('active');
-    if (state.settings.navigationScope === 'SECTION_LIST' && isSelected) classes.push('focus');
-    return `
-      <button type="button" class="${classes.join(' ')}" data-section-index="${index}">
-        <span class="idx">${index + 1}</span>
-        <span>${sectionLabel(section)}</span>
-      </button>
-    `;
-  });
-  setupSectionsRoot.innerHTML = rows.join('');
-}
-
-function renderSetupDetail(): void {
-  const section = getCurrentSection();
-  clampDetailIndex();
-  const view = getSectionView(section);
-  const lines = view.lines.map((line) => `<div class="detail-line">${line}</div>`).join('');
-  const controls = view.controls.length
-    ? view.controls
-        .map((control, index) => {
-          const classes = ['detail-control'];
-          if (index === state.settings.detailIndex) classes.push('active');
-          if (state.settings.navigationScope === 'DETAIL' && index === state.settings.detailIndex) classes.push('focus');
-          return `
-            <button
-              type="button"
-              class="${classes.join(' ')}"
-              data-control-index="${index}"
-              ${control.disabled ? 'disabled' : ''}
-            >
-              ${index + 1}. ${control.label}
-            </button>
-          `;
-        })
-        .join('')
-    : '<div class="detail-empty">No interactive controls for this section.</div>';
-
-  setupDetailRoot.innerHTML = `
-    <div class="detail-title">${view.title}</div>
-    <div class="detail-lines">${lines}</div>
-    <div class="detail-controls">${controls}</div>
-  `;
-}
-
-async function render(): Promise<void> {
-  renderSetupSections();
-  renderSetupDetail();
-  hudMainPreview.textContent = buildSectionsHudText();
-  hudDetailPreview.textContent = buildDetailsHudText();
-  publishStatus.textContent = state.publishStatus;
-  publishBtn.textContent = state.deployed ? 'Update App' : 'Publish App';
+function sanitizeUrl(url: string): string | null {
   try {
-    await pushHudToEvenHub();
-  } catch (error) {
-    console.error('Failed to push HUD update to Even Hub:', error);
+    const parsed = new URL(url.trim());
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null;
+    return parsed.href;
+  } catch { return null; }
+}
+
+function buildEmbedUrl(rawUrl: string): { embedUrl: string; platform: Exclude<VideoPlatform, null> } | null {
+  const url = rawUrl.trim();
+  if (!url) return null;
+
+  const youtubeId = parseYoutubeId(url);
+  if (youtubeId) {
+    const params = new URLSearchParams({ rel: '0' });
+    if (state.userSettings.autoplay) params.set('autoplay', '1');
+    if (state.userSettings.muted) params.set('mute', '1');
+    return { embedUrl: `https://www.youtube.com/embed/${youtubeId}?${params}`, platform: 'youtube' };
   }
-}
 
-function moveSection(direction: 1 | -1): void {
-  const max = SETTINGS_SECTIONS.length;
-  state.settings.sectionIndex = (state.settings.sectionIndex + direction + max) % max;
-  state.settings.detailIndex = 0;
-  state.lastAction = `Section: ${sectionLabel(getCurrentSection())}`;
-}
+  const safe = sanitizeUrl(url);
+  if (!safe) return null;
 
-function moveDetail(direction: 1 | -1): void {
-  const section = getCurrentSection();
-  const total = controlCount(section);
-  if (total <= 1) {
-    state.lastAction = total === 0 ? 'No controls in this section' : 'Control unchanged';
-    return;
-  }
-  state.settings.detailIndex = (state.settings.detailIndex + direction + total) % total;
-  state.lastAction = `Control ${state.settings.detailIndex + 1} selected`;
-}
-
-function clampBrightness(value: number): number {
-  return clampInt(value, 1, 10);
-}
-
-function parseBridgeStoredPrefs(raw: unknown): Partial<PreferencesState> | null {
-  const payload =
-    typeof raw === 'string'
-      ? raw
-      : typeof raw === 'object' && raw && 'value' in raw
-        ? (raw as { value?: unknown }).value
-        : null;
-  if (typeof payload !== 'string' || !payload.trim()) return null;
   try {
-    const parsed = JSON.parse(payload) as Partial<PreferencesState>;
-    return parsed;
-  } catch {
+    const ext = new URL(safe).pathname.toLowerCase().split('?')[0];
+    if (/\.(mp4|webm|ogg|mov|m4v)$/.test(ext)) return { embedUrl: safe, platform: 'direct' };
+  } catch { /* ignore */ }
+
+  return { embedUrl: safe, platform: 'iframe' };
+}
+
+async function tryYoutubeProxy(youtubeUrl: string): Promise<string | null> {
+  const endpoint = `${CONTROL_URL}/video-info?url=${encodeURIComponent(youtubeUrl)}`;
+  log(`Proxy: GET ${endpoint.slice(0, 72)}...`);
+  try {
+    const response = await fetch(endpoint, { cache: 'no-store', signal: AbortSignal.timeout(15000) });
+    log(`Proxy: HTTP ${response.status} ${response.statusText}`);
+    const text = await response.text();
+    log(`Proxy: body = ${text.slice(0, 160)}`);
+    if (!response.ok) return null;
+    const info = JSON.parse(text) as { ok: boolean; proxyUrl?: string; error?: string };
+    if (!info.ok) { log(`Proxy: server error — ${info.error ?? 'unknown'}`); return null; }
+    if (!info.proxyUrl) { log('Proxy: no proxyUrl in response'); return null; }
+    log(`Proxy: success → ${info.proxyUrl.slice(0, 60)}`);
+    return info.proxyUrl;
+  } catch (err) {
+    log(`Proxy: fetch threw — ${String(err)}`);
     return null;
   }
 }
 
-function normalizedPreferences(input: Partial<PreferencesState>): PreferencesState {
-  const sanitizedMenuItems = Array.isArray(input.menuItems)
-    ? input.menuItems
-        .map((item): MenuPreferenceItem | null => {
-          if (!item || typeof item !== 'object') return null;
-          const source = item as Partial<MenuPreferenceItem>;
-          const id = typeof source.id === 'string' && source.id.trim() ? source.id.trim() : null;
-          const label = typeof source.label === 'string' && source.label.trim() ? source.label.trim() : null;
-          if (!id || !label) return null;
-          return { id, label, enabled: source.enabled !== false };
-        })
-        .filter((item): item is MenuPreferenceItem => item !== null)
-    : [];
+// Img size snap points
+const IMG_SCALE_SNAPS: Array<{ val: number; label: string }> = [
+  { val: 1,    label: '1×'   },
+  { val: 2.88, label: 'tall' },
+  { val: 3.24, label: 'full' },
+];
+const IMG_SCALE_SNAP_THRESHOLD = 0.12;
 
-  return {
-    showConnectionTips:
-      typeof input.showConnectionTips === 'boolean' ? input.showConnectionTips : state.preferences.showConnectionTips,
-    compactHud: typeof input.compactHud === 'boolean' ? input.compactHud : state.preferences.compactHud,
-    headsUpEnabled: typeof input.headsUpEnabled === 'boolean' ? input.headsUpEnabled : state.preferences.headsUpEnabled,
-    autoDisplayEnabled:
-      typeof input.autoDisplayEnabled === 'boolean' ? input.autoDisplayEnabled : state.preferences.autoDisplayEnabled,
-    brightnessLevel: clampBrightness(typeof input.brightnessLevel === 'number' ? input.brightnessLevel : state.preferences.brightnessLevel),
-    menuItems: sanitizedMenuItems.length > 0 ? sanitizedMenuItems : state.preferences.menuItems.map((item) => ({ ...item })),
-  };
+function snapImgScale(raw: number): number {
+  for (const s of IMG_SCALE_SNAPS) {
+    if (Math.abs(raw - s.val) < IMG_SCALE_SNAP_THRESHOLD) return s.val;
+  }
+  return raw;
 }
 
-function loadBrowserPreferences(): void {
+function imgScaleLabel(val: number): string {
+  const snap = IMG_SCALE_SNAPS.find((s) => Math.abs(val - s.val) < 0.001);
+  return snap ? snap.label : `${val.toFixed(2)}×`;
+}
+
+// ── Canvas filter + transform pipeline ───────────────────────────────────────
+
+function buildCssFilter(): string {
+  const { brightness, contrast, invert } = state.userSettings.filters;
+  const parts: string[] = [];
+  if (brightness !== 0) parts.push(`brightness(${Math.max(0, 1 + brightness / 100).toFixed(2)})`);
+  if (contrast !== 0) parts.push(`contrast(${Math.max(0, 1 + contrast / 100).toFixed(2)})`);
+  if (invert) parts.push('invert(1)');
+  return parts.join(' ') || 'none';
+}
+
+function drawFilteredFrame(): void {
+  const { zoom, panX, panY } = state.userSettings.filters;
+
+  captureCtx.filter = 'none';
+  captureCtx.fillStyle = '#000';
+  captureCtx.fillRect(0, 0, IMAGE_W, IMAGE_H);
+
+  captureCtx.save();
+  captureCtx.filter = buildCssFilter();
+
+  // Zoom + pan: translate to center, scale, apply pan offset, draw centered
+  const tx = (panX / 100) * (IMAGE_W * (zoom - 1)) / 2;
+  const ty = (panY / 100) * (IMAGE_H * (zoom - 1)) / 2;
+  captureCtx.translate(IMAGE_W / 2 + tx, IMAGE_H / 2 + ty);
+  captureCtx.scale(zoom, zoom);
+  captureCtx.drawImage(videoEl, -IMAGE_W / 2, -IMAGE_H / 2, IMAGE_W, IMAGE_H);
+
+  captureCtx.restore();
+}
+
+function applyFiltersToBrowserVideo(): void {
+  const target = state.video.platform === 'direct'
+    ? videoEl as HTMLElement
+    : videoContainer.querySelector<HTMLElement>('iframe');
+  if (!target) return;
+
+  const { zoom, panX, panY } = state.userSettings.filters;
+  target.style.filter = buildCssFilter() === 'none' ? '' : buildCssFilter();
+
+  if (zoom !== 1 || panX !== 0 || panY !== 0) {
+    // % translate is relative to the element size, applied before scale
+    const maxPct = (1 - 1 / zoom) * 50;
+    const tx = (panX / 100) * maxPct;
+    const ty = (panY / 100) * maxPct;
+    target.style.transform = `scale(${zoom}) translate(${tx}%, ${ty}%)`;
+    target.style.transformOrigin = '50% 50%';
+  } else {
+    target.style.transform = '';
+  }
+}
+
+// ── Frame capture ─────────────────────────────────────────────────────────────
+
+function stopFrameCapture(): void {
+  if (frameIntervalId !== null) { clearInterval(frameIntervalId); frameIntervalId = null; }
+}
+
+function startFrameCapture(): void {
+  stopFrameCapture();
+  if (!state.video.loaded || state.video.platform !== 'direct') return;
+  const ms = Math.max(100, Math.round(1000 / state.userSettings.fps));
+  frameIntervalId = setInterval(() => void captureAndSendFrame(), ms);
+}
+
+async function captureAndSendFrame(): Promise<void> {
+  if (isTransmittingFrame) return;
+
+  if (videoEl.readyState < 2 || videoEl.paused || videoEl.ended) {
+    if (!_frameLoggedSkip) {
+      log(`Frame: skip — readyState=${videoEl.readyState} paused=${videoEl.paused} ended=${videoEl.ended}`);
+      _frameLoggedSkip = true;
+    }
+    return;
+  }
+  _frameLoggedSkip = false;
+
+  drawFilteredFrame();
+
+  // Mirror to debug preview
+  const previewCtx = hudImagePreview.getContext('2d');
+  if (previewCtx) previewCtx.drawImage(captureCanvas, 0, 0, IMAGE_W, IMAGE_H);
+
+  if (!bridge || !imageContainerActive) {
+    if (!_frameLoggedSkip) {
+      log(`Frame: no bridge=${!bridge} imgActive=${imageContainerActive}`);
+      _frameLoggedSkip = true;
+    }
+    return;
+  }
+
+  const base64 = captureCanvas.toDataURL('image/jpeg', 0.6).split(',')[1];
+  isTransmittingFrame = true;
+  try {
+    const result = await bridge.updateImageRawData(new ImageRawDataUpdate({
+      containerID: IMAGE_CONTAINER_ID,
+      containerName: IMAGE_CONTAINER_NAME,
+      imageData: base64,
+    }));
+    if (!ImageRawDataUpdateResult.isSuccess(result)) {
+      log(`Frame: updateImageRawData failed — ${String(result)}`);
+    }
+  } catch (err) {
+    log(`Frame: send threw — ${String(err)}`);
+  } finally {
+    isTransmittingFrame = false;
+  }
+}
+
+// ── Glasses page (image container only, no text) ──────────────────────────────
+
+async function setupGlassesPage(withImage: boolean): Promise<void> {
+  if (!bridge) return;
+
+  const { w, h, x, y } = computeImgDisplaySize();
+  const payload = withImage
+    ? {
+        containerTotalNum: 1,
+        imageObject: [new ImageContainerProperty({
+          containerID: IMAGE_CONTAINER_ID,
+          containerName: IMAGE_CONTAINER_NAME,
+          xPosition: x,
+          yPosition: y,
+          width: w,
+          height: h,
+        })],
+      }
+    : { containerTotalNum: 0 };
+
+  if (!startupCreated) {
+    const result = await bridge.createStartUpPageContainer(new CreateStartUpPageContainer(payload));
+    startupCreated = result === 0;
+    if (!startupCreated) {
+      const ok = await bridge.rebuildPageContainer(new RebuildPageContainer(payload));
+      startupCreated = !!ok;
+    }
+  } else {
+    await bridge.rebuildPageContainer(new RebuildPageContainer(payload));
+  }
+
+  imageContainerActive = withImage && startupCreated;
+  log(`Glasses page: withImage=${withImage} active=${imageContainerActive}`);
+}
+
+// ── Video rendering ───────────────────────────────────────────────────────────
+
+function renderVideo(): void {
+  if (!state.video.loaded || !state.video.embedUrl) {
+    videoContainer.innerHTML = '<div class="video-placeholder">Enter a video URL above and click Load</div>';
+    return;
+  }
+
+  videoContainer.innerHTML = '';
+
+  if (state.video.platform === 'direct') {
+    videoEl.src = state.video.embedUrl;
+    videoEl.controls = true;
+    videoEl.muted = state.userSettings.muted;
+    videoEl.style.cssText = 'width:100%;height:100%;display:block;object-fit:contain;background:#000;';
+    videoContainer.appendChild(videoEl);
+    if (state.userSettings.autoplay) videoEl.play().catch(() => undefined);
+  } else {
+    const iframe = document.createElement('iframe');
+    iframe.className = 'video-frame';
+    iframe.src = state.video.embedUrl;
+    iframe.setAttribute('frameborder', '0');
+    iframe.setAttribute('allowfullscreen', '');
+    iframe.setAttribute('referrerpolicy', 'strict-origin-when-cross-origin');
+    if (state.video.platform === 'youtube') {
+      iframe.setAttribute('allow', 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share');
+    }
+    videoContainer.appendChild(iframe);
+  }
+
+  applyFiltersToBrowserVideo();
+}
+
+function updateGlassesStatus(): void {
+  if (!state.video.loaded) { glassesStatus.textContent = ''; return; }
+  if (!state.bridgeConnected) {
+    glassesStatus.textContent = 'Glasses not connected — video plays in browser only.';
+    return;
+  }
+  if (state.video.platform === 'direct') {
+    const label = parseYoutubeId(state.video.inputUrl) ? 'YouTube' : 'Video';
+    glassesStatus.textContent = `${label} streaming to glasses at ${state.userSettings.fps} fps.`;
+  } else if (state.video.platform === 'youtube') {
+    glassesStatus.textContent = 'YouTube plays in browser only — control server unreachable.';
+  } else {
+    glassesStatus.textContent = 'Video plays in browser. Glasses show nothing (not a direct video URL).';
+  }
+}
+
+// ── Slider helpers ────────────────────────────────────────────────────────────
+
+function updateSliderDisplays(): void {
+  const f = state.userSettings.filters;
+  brightnessSlider.value = String(f.brightness);
+  contrastSlider.value   = String(f.contrast);
+  zoomSlider.value       = String(f.zoom);
+  panxSlider.value       = String(f.panX);
+  panySlider.value       = String(f.panY);
+  invertToggle.checked   = f.invert;
+
+  imgscaleSlider.value       = String(f.imgScale);
+  brightnessVal.textContent  = String(f.brightness);
+  contrastVal.textContent    = String(f.contrast);
+  zoomVal.textContent        = `${f.zoom.toFixed(2)}×`;
+  panxVal.textContent        = String(f.panX);
+  panyVal.textContent        = String(f.panY);
+  imgscaleVal.textContent    = imgScaleLabel(f.imgScale);
+}
+
+function onFiltersChanged(): void {
+  updateSliderDisplays();
+  applyFiltersToBrowserVideo();
+  persistUserSettings();
+}
+
+// ── Render ────────────────────────────────────────────────────────────────────
+
+function render(): void {
+  renderVideo();
+  updateGlassesStatus();
+  publishStatus.textContent = state.publishStatus;
+  publishBtn.textContent = state.deployed ? 'Update App' : 'Publish App';
+}
+
+// ── Load / clear ──────────────────────────────────────────────────────────────
+
+async function loadVideo(): Promise<void> {
+  const raw = videoUrlInput.value.trim();
+  if (!raw) return;
+
+  let result = buildEmbedUrl(raw);
+  if (!result) {
+    state.video = { inputUrl: raw, embedUrl: null, platform: null, loaded: false };
+    videoContainer.innerHTML = '<div class="video-placeholder error">Invalid URL — enter a valid http/https URL.</div>';
+    glassesStatus.textContent = '';
+    return;
+  }
+
+  if (result.platform === 'youtube') {
+    glassesStatus.textContent = 'Resolving YouTube via proxy…';
+    log('loadVideo: YouTube URL detected, trying proxy…');
+    const proxyUrl = await tryYoutubeProxy(raw);
+    if (proxyUrl) {
+      log('loadVideo: proxy resolved → direct mode');
+      result = { embedUrl: proxyUrl, platform: 'direct' };
+    } else {
+      log('loadVideo: proxy unavailable → iframe fallback');
+    }
+  }
+
+  stopFrameCapture();
+  state.video = { inputUrl: raw, embedUrl: result.embedUrl, platform: result.platform, loaded: true };
+  persistUserSettings();
+
+  if (bridge) await setupGlassesPage(result.platform === 'direct');
+
+  render();
+  if (result.platform === 'direct') startFrameCapture();
+}
+
+function clearVideo(): void {
+  stopFrameCapture();
+  videoEl.pause();
+  videoEl.src = '';
+  state.video = { inputUrl: '', embedUrl: null, platform: null, loaded: false };
+  videoUrlInput.value = '';
+  imageContainerActive = false;
+  if (bridge && startupCreated) void setupGlassesPage(false);
+  render();
+}
+
+// ── Persistence ───────────────────────────────────────────────────────────────
+
+function persistUserSettings(): void {
+  try { window.localStorage.setItem(BROWSER_STORAGE_KEY, JSON.stringify(state.userSettings)); } catch { /* ignore */ }
+}
+
+function loadUserSettings(): void {
   try {
     const raw = window.localStorage.getItem(BROWSER_STORAGE_KEY);
     if (!raw) return;
-    const parsed = JSON.parse(raw) as Partial<PreferencesState>;
-    state.preferences = normalizedPreferences(parsed);
-    state.settings.menuEditorIndex = clampInt(state.settings.menuEditorIndex, 0, Math.max(0, state.preferences.menuItems.length - 1));
-  } catch {
-    state.lastAction = 'Browser preferences unreadable; using defaults';
-  }
-}
-
-function persistBrowserPreferences(): void {
-  window.localStorage.setItem(BROWSER_STORAGE_KEY, JSON.stringify(state.preferences));
-}
-
-async function loadBridgePreferences(): Promise<void> {
-  const b = asBridgeExtras();
-  if (!b?.getLocalStorage) return;
-  try {
-    const raw = await b.getLocalStorage(BRIDGE_STORAGE_KEY);
-    const parsed = parseBridgeStoredPrefs(raw);
-    if (!parsed) return;
-
-    state.preferences = normalizedPreferences(parsed);
-    state.settings.menuEditorIndex = clampInt(state.settings.menuEditorIndex, 0, Math.max(0, state.preferences.menuItems.length - 1));
-  } catch {
-    state.lastAction = 'Bridge preferences unavailable';
-  }
-}
-
-async function persistBridgePreferences(): Promise<void> {
-  const b = asBridgeExtras();
-  if (!b?.setLocalStorage) return;
-  try {
-    await b.setLocalStorage(BRIDGE_STORAGE_KEY, JSON.stringify(state.preferences));
-  } catch {
-    state.lastAction = 'Failed to sync preferences to bridge';
-  }
-}
-
-async function persistPreferences(): Promise<void> {
-  persistBrowserPreferences();
-  await persistBridgePreferences();
-}
-
-async function refreshDeviceSnapshot(): Promise<void> {
-  const b = asBridgeExtras();
-  if (!b) {
-    state.device.connectionState = 'DISCONNECTED';
-    state.lastAction = 'Bridge unavailable';
-    return;
-  }
-
-  try {
-    if (b.getDeviceInfo) {
-      const info = await b.getDeviceInfo();
-      if (typeof info === 'object' && info) {
-        const root = info as unknown as Record<string, unknown>;
-        const glasses = (root.glasses ?? root.glassesInfo ?? root.device ?? null) as Record<string, unknown> | null;
-        const ring = (root.ring ?? root.ringInfo ?? null) as Record<string, unknown> | null;
-        state.device.glassesBatteryPct = toNumberOrNull(
-          readNested(root, ['glassesBattery', 'battery', 'batteryLevel', 'batteryPct']) ??
-            (glasses ? readNested(glasses, ['battery', 'batteryLevel', 'batteryPct']) : null),
-        );
-        state.device.ringBatteryPct = toNumberOrNull(
-          readNested(root, ['ringBattery']) ?? (ring ? readNested(ring, ['battery', 'batteryLevel', 'batteryPct']) : null),
-        );
-        state.device.wearing = toBoolOrNull(readNested(root, ['wearing', 'wearingStatus', 'isWearing']));
-        state.device.charging = toBoolOrNull(readNested(root, ['charging', 'chargingStatus', 'isCharging']));
-        state.device.inCase = toBoolOrNull(readNested(root, ['inCase', 'inCaseStatus', 'isInCase']));
-        state.device.model = safeString(readNested(root, ['model', 'deviceModel', 'glassesModel']), state.device.model);
-        state.device.serial = safeString(readNested(root, ['serial', 'serialNumber', 'sn']), state.device.serial);
-        state.device.firmware = safeString(readNested(root, ['firmware', 'firmwareVersion', 'fw']), state.device.firmware);
-      }
+    const parsed = JSON.parse(raw) as Partial<UserSettings & { filters?: Partial<ImageFilters> }>;
+    if (typeof parsed.fps === 'number') state.userSettings.fps = clampFps(parsed.fps);
+    if (typeof parsed.autoplay === 'boolean') state.userSettings.autoplay = parsed.autoplay;
+    if (typeof parsed.muted === 'boolean') state.userSettings.muted = parsed.muted;
+    if (parsed.filters) {
+      const f = parsed.filters;
+      if (typeof f.brightness === 'number') state.userSettings.filters.brightness = clamp(f.brightness, -100, 100);
+      if (typeof f.contrast === 'number')   state.userSettings.filters.contrast   = clamp(f.contrast, -100, 100);
+      if (typeof f.invert === 'boolean')    state.userSettings.filters.invert     = f.invert;
+      if (typeof f.zoom === 'number')       state.userSettings.filters.zoom       = clamp(f.zoom, 1, 4);
+      if (typeof f.panX === 'number')       state.userSettings.filters.panX       = clamp(f.panX, -100, 100);
+      if (typeof f.panY === 'number')       state.userSettings.filters.panY       = clamp(f.panY, -100, 100);
+      if (typeof f.imgScale === 'number')   state.userSettings.filters.imgScale   = clamp(f.imgScale, 1, 4);
     }
-
-    if (b.getUserInfo) {
-      const user = await b.getUserInfo();
-      if (typeof user === 'object' && user) {
-        const userObj = user as unknown as Record<string, unknown>;
-        state.device.userName = safeString(readNested(userObj, ['name', 'nickname', 'displayName']), state.device.userName);
-        state.device.uid = safeString(readNested(userObj, ['uid', 'userId', 'id']), state.device.uid);
-        state.device.country = safeString(readNested(userObj, ['country', 'region']), state.device.country);
-      }
-    }
-    state.device.connectionState = 'CONNECTED';
-    state.lastAction = 'Device snapshot refreshed';
-  } catch {
-    state.device.connectionState = 'DISCONNECTED';
-    state.lastAction = 'Device snapshot refresh failed';
-  }
+  } catch { /* ignore */ }
 }
 
-function updateCapabilitiesFromBridge(): void {
-  const b = asBridgeExtras();
-  state.capabilities.bridgeConnected = !!b;
-  state.capabilities.hasDeviceInfo = !!b?.getDeviceInfo;
-  state.capabilities.hasUserInfo = !!b?.getUserInfo;
-  state.capabilities.micAvailable = !!b?.audioControl;
-  state.capabilities.imuAvailable = !!b?.imuControl;
-  state.capabilities.canExit = !!b?.shutDownPageContainer;
-  state.capabilities.canPersistBridgeStorage = !!b?.getLocalStorage && !!b?.setLocalStorage;
-  state.device.connectionState = b ? 'CONNECTED' : 'DISCONNECTED';
+function syncAllInputs(): void {
+  fpsInput.value = String(state.userSettings.fps);
+  autoplayToggle.checked = state.userSettings.autoplay;
+  mutedToggle.checked = state.userSettings.muted;
+  updateSliderDisplays();
 }
 
-async function toggleMic(): Promise<void> {
-  const b = asBridgeExtras();
-  if (!b?.audioControl || !state.capabilities.micAvailable) {
-    state.lastAction = 'Mic control requires connected hardware';
-    return;
-  }
-  const next = !state.settings.micActive;
-  try {
-    await b.audioControl(next);
-    state.settings.micActive = next;
-    state.lastAction = next ? 'Mic capture started' : 'Mic capture stopped';
-  } catch {
-    state.lastAction = 'Mic operation failed';
-  }
+function clampFps(v: number): number {
+  return !Number.isFinite(v) ? DEFAULT_FPS : Math.max(MIN_FPS, Math.min(MAX_FPS, Math.trunc(v)));
 }
 
-function mapPaceToken(token: string): unknown {
-  return token;
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(hi, v));
 }
 
-async function toggleImu(): Promise<void> {
-  const b = asBridgeExtras();
-  if (!b?.imuControl || !state.capabilities.imuAvailable) {
-    state.lastAction = 'IMU control requires connected hardware';
-    return;
-  }
-  const next = !state.settings.imuActive;
-  try {
-    if (next) {
-      const paceToken = IMU_PACE_OPTIONS[state.settings.imuPaceIndex];
-      await b.imuControl(true, mapPaceToken(paceToken));
-    } else {
-      await b.imuControl(false);
-    }
-    state.settings.imuActive = next;
-    state.lastAction = next ? 'IMU streaming started' : 'IMU streaming stopped';
-  } catch {
-    state.lastAction = 'IMU operation failed';
-  }
+function clampAppName(v: string): string {
+  return String(v || '').trim().slice(0, MAX_APP_NAME_LENGTH);
 }
 
-function cycleImuPace(): void {
-  state.settings.imuPaceIndex = (state.settings.imuPaceIndex + 1) % IMU_PACE_OPTIONS.length;
-  state.lastAction = `IMU pace: ${IMU_PACE_OPTIONS[state.settings.imuPaceIndex]}`;
+// ── Bridge events ─────────────────────────────────────────────────────────────
+
+function extractEventType(event: unknown): unknown {
+  const i = event as Record<string, unknown> | null | undefined;
+  if (!i) return null;
+  const l = i.listEvent as Record<string, unknown> | null;
+  const t = i.textEvent as Record<string, unknown> | null;
+  const s = i.sysEvent as Record<string, unknown> | null;
+  return l?.eventType ?? t?.eventType ?? s?.eventType ?? l?.type ?? t?.type ?? s?.type ?? i.eventType ?? i.type ?? i.name;
 }
 
-async function exitApp(): Promise<void> {
-  const b = asBridgeExtras();
-  if (!b?.shutDownPageContainer) {
-    state.lastAction = 'Exit requires connected hardware';
-    return;
-  }
-  try {
-    await b.shutDownPageContainer(1);
-    state.lastAction = 'Exit requested';
-  } catch {
-    state.lastAction = 'Exit request failed';
-  }
-}
-
-function appendEventLog(line: string): void {
-  eventLines.push(line);
-  while (eventLines.length > 8) {
-    eventLines.shift();
-  }
-  eventLog.textContent = eventLines.join('\n');
-}
-
-function mapEventTypeToAction(eventType: unknown): InputAction | null {
+function mapEventType(eventType: unknown): string | null {
   if (eventType === undefined || eventType === null) return null;
-
-  const normalized = OsEventTypeList.fromJson?.(eventType);
-  if (normalized === OsEventTypeList.CLICK_EVENT) return 'CLICK';
-  if (normalized === OsEventTypeList.SCROLL_TOP_EVENT) return 'UP';
-  if (normalized === OsEventTypeList.SCROLL_BOTTOM_EVENT) return 'DOWN';
-  if (normalized === OsEventTypeList.DOUBLE_CLICK_EVENT) return 'DOUBLE_CLICK';
-
-  if (eventType === OsEventTypeList.CLICK_EVENT || eventType === 0) return 'CLICK';
-  if (eventType === OsEventTypeList.SCROLL_TOP_EVENT || eventType === 1) return 'UP';
-  if (eventType === OsEventTypeList.SCROLL_BOTTOM_EVENT || eventType === 2) return 'DOWN';
-  if (eventType === OsEventTypeList.DOUBLE_CLICK_EVENT || eventType === 3) return 'DOUBLE_CLICK';
-
-  const text = String(eventType).toUpperCase();
-  if (text.includes('DOUBLE') && text.includes('CLICK')) return 'DOUBLE_CLICK';
-  if (text.includes('DOUBLE') && text.includes('TAP')) return 'DOUBLE_CLICK';
-  if (text.includes('SCROLL_TOP') || text === 'UP' || text.includes('SWIPE_UP')) return 'UP';
-  if (text.includes('SCROLL_BOTTOM') || text === 'DOWN' || text.includes('SWIPE_DOWN')) return 'DOWN';
-  if (text.includes('SINGLE') && text.includes('CLICK')) return 'CLICK';
-  if (text.includes('SINGLE') && text.includes('TAP')) return 'CLICK';
-  if (text.includes('TAP_EVENT') || text === 'TAP') return 'CLICK';
-  if (text === 'CLICK' || text.includes('CLICK_EVENT')) return 'CLICK';
-
+  const n = OsEventTypeList.fromJson?.(eventType);
+  if (n === OsEventTypeList.CLICK_EVENT) return 'CLICK';
+  if (n === OsEventTypeList.SCROLL_TOP_EVENT) return 'UP';
+  if (n === OsEventTypeList.SCROLL_BOTTOM_EVENT) return 'DOWN';
+  if (n === OsEventTypeList.DOUBLE_CLICK_EVENT) return 'DOUBLE_CLICK';
+  if (eventType === 0) return 'CLICK';
+  if (eventType === 1) return 'UP';
+  if (eventType === 2) return 'DOWN';
+  if (eventType === 3) return 'DOUBLE_CLICK';
+  const t = String(eventType).toUpperCase();
+  if (t.includes('DOUBLE')) return 'DOUBLE_CLICK';
+  if (t.includes('SCROLL_TOP') || t === 'UP') return 'UP';
+  if (t.includes('SCROLL_BOTTOM') || t === 'DOWN') return 'DOWN';
+  if (t === 'CLICK' || t.includes('CLICK_EVENT') || t === 'TAP') return 'CLICK';
   return null;
 }
 
-function extractEventType(event: unknown): unknown {
-  const input = event as Record<string, unknown> | null | undefined;
-  if (!input) return null;
-  const listEvent = (input.listEvent ?? null) as Record<string, unknown> | null;
-  const textEvent = (input.textEvent ?? null) as Record<string, unknown> | null;
-  const sysEvent = (input.sysEvent ?? null) as Record<string, unknown> | null;
-  return (
-    listEvent?.eventType ??
-    textEvent?.eventType ??
-    sysEvent?.eventType ??
-    listEvent?.eventName ??
-    textEvent?.eventName ??
-    sysEvent?.eventName ??
-    listEvent?.type ??
-    textEvent?.type ??
-    sysEvent?.type ??
-    input.eventType ??
-    input.type ??
-    input.name
-  );
-}
-
-function shouldTreatEmptySysEventAsClick(event: unknown): boolean {
-  const explicitType = extractEventType(event);
-  if (mapEventTypeToAction(explicitType)) return false;
-
+function isDuplicateEvent(event: unknown, label: string): boolean {
+  const p = event as Record<string, unknown> | null | undefined;
+  const sig = JSON.stringify({ l: p?.listEvent ?? null, t: p?.textEvent ?? null, s: p?.sysEvent ?? null, e: p?.eventType ?? null });
   const now = Date.now();
-  if (lastResolvedAction === 'DOUBLE_CLICK' && now - lastResolvedActionAt < 350) return false;
-  return true;
-}
-
-function isDuplicateEvent(event: unknown, eventLabel: string): boolean {
-  const payload = event as Record<string, unknown> | null | undefined;
-  const signature = JSON.stringify({
-    listEvent: payload?.listEvent ?? null,
-    textEvent: payload?.textEvent ?? null,
-    sysEvent: payload?.sysEvent ?? null,
-    eventType: payload?.eventType ?? null,
-    type: payload?.type ?? null,
-  });
-
-  const now = Date.now();
-  if (eventLabel === lastEventLabel && signature === lastEventSignature && now - lastEventAt < 140) {
-    return true;
-  }
-
-  lastEventLabel = eventLabel;
-  lastEventSignature = signature;
-  lastEventAt = now;
+  if (label === lastEventLabel && sig === lastEventSignature && now - lastEventAt < 140) return true;
+  lastEventLabel = label; lastEventSignature = sig; lastEventAt = now;
   return false;
 }
 
-function extractImuVector(event: unknown): ImuVector | null {
-  const payload = event as Record<string, unknown> | null | undefined;
-  if (!payload) return null;
-
-  const imuRoot = (payload.imuEvent ?? payload.imuData ?? payload.imu ?? payload.motion ?? null) as
-    | Record<string, unknown>
-    | null;
-  if (!imuRoot) return null;
-
-  const x = toNumberOrNull(readNested(imuRoot, ['x', 'axisX', 'pitch']));
-  const y = toNumberOrNull(readNested(imuRoot, ['y', 'axisY', 'roll']));
-  const z = toNumberOrNull(readNested(imuRoot, ['z', 'axisZ', 'yaw']));
-  if (x === null || y === null || z === null) return null;
-  return { x, y, z };
+function handleHubEvent(event: unknown): void {
+  const label = mapEventType(extractEventType(event)) ?? 'EVENT';
+  if (isDuplicateEvent(event, label)) return;
+  log(label);
 }
 
-async function activateDetailControl(section: SettingsSection): Promise<void> {
-  const controlIndex = state.settings.detailIndex;
-
-  if (section === 'HOME') {
-    if (controlIndex === 0) await refreshDeviceSnapshot();
-    return;
-  }
-
-  if (section === 'DEVICE_INFO') {
-    if (controlIndex === 0) await refreshDeviceSnapshot();
-    return;
-  }
-
-  if (section === 'MIC_TEST') {
-    if (controlIndex === 0) await toggleMic();
-    return;
-  }
-
-  if (section === 'IMU_VIEWER') {
-    if (controlIndex === 0) {
-      cycleImuPace();
-      return;
-    }
-    if (controlIndex === 1) {
-      await toggleImu();
-    }
-    return;
-  }
-
-  if (section === 'DISPLAY_HUD') {
-    if (controlIndex === 0) {
-      state.lastAction = 'Brightness control pending SDK support';
-      return;
-    }
-    if (controlIndex === 1) state.preferences.headsUpEnabled = !state.preferences.headsUpEnabled;
-    if (controlIndex === 2) state.preferences.autoDisplayEnabled = !state.preferences.autoDisplayEnabled;
-    await persistPreferences();
-    if (controlIndex === 1) {
-      state.lastAction = `Heads-up display: ${state.preferences.headsUpEnabled ? 'on' : 'off'}`;
-    }
-    if (controlIndex === 2) {
-      state.lastAction = `Auto display: ${state.preferences.autoDisplayEnabled ? 'on' : 'off'}`;
-    }
-    return;
-  }
-
-  if (section === 'MENU_EDITOR') {
-    state.lastAction = 'Menu editor pending SDK support';
-    return;
-  }
-
-  if (section === 'APP_PREFERENCES') {
-    if (controlIndex === 0) state.preferences.showConnectionTips = !state.preferences.showConnectionTips;
-    if (controlIndex === 1) state.preferences.compactHud = !state.preferences.compactHud;
-    await persistPreferences();
-    state.lastAction = 'Preferences updated';
-    return;
-  }
-
-  if (section === 'ABOUT_EXIT' && controlIndex === 0) {
-    await exitApp();
-    return;
-  }
-
-  state.lastAction = 'No action for this control';
-}
-
-async function applyAction(action: InputAction): Promise<void> {
-  const section = getCurrentSection();
-  const view = getSectionView(section);
-
-  if (state.settings.navigationScope === 'SECTION_LIST') {
-    if (action === 'UP') moveSection(-1);
-    if (action === 'DOWN') moveSection(1);
-    if (action === 'CLICK') {
-      state.settings.navigationScope = 'DETAIL';
-      state.settings.detailIndex = 0;
-      state.lastAction = `Detail mode: ${view.title}`;
-    }
-    if (action === 'DOUBLE_CLICK') {
-      state.lastAction = 'Already at section list';
-    }
-    await render();
-    return;
-  }
-
-  if (action === 'UP') moveDetail(-1);
-  if (action === 'DOWN') moveDetail(1);
-  if (action === 'CLICK') {
-    clampDetailIndex();
-    const selected = getSectionView(section).controls[state.settings.detailIndex];
-    if (selected?.disabled) {
-      state.lastAction = 'Control disabled in offline mode';
-    } else {
-      await activateDetailControl(section);
-    }
-  }
-  if (action === 'DOUBLE_CLICK') {
-    state.settings.navigationScope = 'SECTION_LIST';
-    state.settings.detailIndex = 0;
-    state.lastAction = 'Back to sections';
-  }
-  await render();
-}
-
-async function createStartupPage(): Promise<void> {
-  if (!bridge) return;
-  const leftContent = buildSectionsHudText();
-  const rightContent = buildDetailsHudText();
-  const containerPayload = {
-    containerTotalNum: 2,
-    textObject: [
-      new TextContainerProperty({
-        xPosition: MAIN_PANEL_X,
-        yPosition: 0,
-        width: LEFT_PANEL_WIDTH,
-        height: 288,
-        containerID: SECTIONS_CONTAINER_ID,
-        containerName: SECTIONS_CONTAINER_NAME,
-        content: leftContent,
-        isEventCapture: 1,
-      }),
-      new TextContainerProperty({
-        xPosition: RIGHT_PANEL_X,
-        yPosition: 0,
-        width: RIGHT_PANEL_WIDTH,
-        height: 288,
-        containerID: DETAILS_CONTAINER_ID,
-        containerName: DETAILS_CONTAINER_NAME,
-        content: rightContent,
-        isEventCapture: 0,
-      }),
-    ],
-  };
-
-  const result = await bridge.createStartUpPageContainer(new CreateStartUpPageContainer(containerPayload));
-  startupCreated = result === 0;
-  if (startupCreated) return;
-
-  console.warn('createStartUpPageContainer failed with code:', result, 'trying rebuildPageContainer...');
-  const rebuildOk = await bridge.rebuildPageContainer(new RebuildPageContainer(containerPayload));
-  startupCreated = !!rebuildOk;
-  if (!startupCreated) {
-    console.warn('rebuildPageContainer also failed');
-  }
-}
+// ── Publish / EHPK ────────────────────────────────────────────────────────────
 
 async function publishApp(): Promise<void> {
-  if (state.publishStatus === 'RUNNING') {
-    publishLog.textContent = 'Publish is already running. Please wait...';
-    await render();
-    return;
-  }
+  if (state.publishStatus === 'RUNNING') { publishLog.textContent = 'Already running…'; return; }
 
-  const configResponse = await fetch(`${CONTROL_URL}/config`, { cache: 'no-store' }).catch(() => null);
-  const configBody = (await configResponse?.json().catch(() => null)) as
-    | { config?: { appName?: string; github?: { repo?: string } } }
-    | null;
+  const configRes = await fetch(`${CONTROL_URL}/config`, { cache: 'no-store' }).catch(() => null);
+  const configBody = (await configRes?.json().catch(() => null)) as
+    | { config?: { appName?: string; github?: { repo?: string } } } | null;
 
-  const savedRepoName = (configBody?.config?.github?.repo ?? '').trim();
-  const defaultAppName = clampAppName(savedRepoName || configBody?.config?.appName || 'even-g2-settings');
-  let appName = defaultAppName;
+  const savedRepo = (configBody?.config?.github?.repo ?? '').trim();
+  const defaultName = clampAppName(savedRepo || configBody?.config?.appName || 'video-display');
+  let appName = defaultName;
 
-  if (!savedRepoName) {
-    const appNameInput = window.prompt(`App name (max ${MAX_APP_NAME_LENGTH} chars):`, defaultAppName);
-    appName = clampAppName(appNameInput ?? '');
-    if (!appName) {
-      publishLog.textContent = 'Publish cancelled: app name is required.';
-      await render();
-      return;
-    }
+  if (!savedRepo) {
+    const input = window.prompt(`App name (max ${MAX_APP_NAME_LENGTH} chars):`, defaultName);
+    appName = clampAppName(input ?? '');
+    if (!appName) { publishLog.textContent = 'Cancelled.'; return; }
   }
 
   state.publishStatus = 'RUNNING';
-  publishBtn.disabled = true;
-  ehpkBtn.disabled = true;
-  publishLog.textContent = `Publishing "${appName}"...`;
-  await render();
+  publishBtn.disabled = true; ehpkBtn.disabled = true;
+  publishLog.textContent = `Publishing "${appName}"…`;
+  publishStatus.textContent = state.publishStatus;
 
   try {
     let response = await fetch(`${CONTROL_URL}/publish-app`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ appName }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ appName }),
     });
-
     let body = (await response.json().catch(() => null)) as
-      | { error?: string; logs?: string; code?: string; publishUrl?: string }
-      | null;
+      | { error?: string; logs?: string; code?: string; publishUrl?: string } | null;
 
     if (!response.ok && (body?.code === 'PAT_REQUIRED' || body?.code === 'INVALID_PAT')) {
-      const promptText =
-        body?.code === 'INVALID_PAT'
-          ? 'Saved PAT is invalid. Paste a new GitHub PAT:'
-          : 'GitHub PAT required. Paste PAT:';
-      const pat = window.prompt(promptText);
-      if (!pat || !pat.trim()) {
-        throw new Error('Publish cancelled: PAT is required.');
-      }
+      const pat = window.prompt(body.code === 'INVALID_PAT' ? 'Saved PAT is invalid. New PAT:' : 'GitHub PAT required:');
+      if (!pat?.trim()) throw new Error('PAT required.');
       response = await fetch(`${CONTROL_URL}/publish-app`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ appName, pat: pat.trim() }),
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ appName, pat: pat.trim() }),
       });
-      body = (await response.json().catch(() => null)) as
-        | { error?: string; logs?: string; publishUrl?: string }
-        | null;
+      body = (await response.json().catch(() => null)) as { error?: string; logs?: string; publishUrl?: string } | null;
     }
 
     if (!response.ok) {
-      if (response.status === 409) {
-        state.publishStatus = 'RUNNING';
-        publishLog.textContent = 'Publish already running. Please wait for it to complete.';
-        await render();
-        return;
-      }
+      if (response.status === 409) { publishLog.textContent = 'Already running.'; return; }
       throw new Error(body?.error ?? `HTTP ${response.status}`);
     }
-
-    state.publishStatus = 'DONE';
-    state.deployed = true;
-    publishLog.textContent = `${body?.logs ?? 'Publish complete.'}\n\nPublished URL:\n${body?.publishUrl ?? 'unknown'}`;
-  } catch (error) {
+    state.publishStatus = 'DONE'; state.deployed = true;
+    publishLog.textContent = `${body?.logs ?? 'Done.'}\n\n${body?.publishUrl ?? ''}`;
+  } catch (e) {
     state.publishStatus = 'FAILED';
-    publishLog.textContent = `Error: ${String(error)}`;
+    publishLog.textContent = `Error: ${String(e)}`;
   } finally {
-    publishBtn.disabled = false;
-    ehpkBtn.disabled = false;
-    await render();
+    publishBtn.disabled = false; ehpkBtn.disabled = false;
+    publishStatus.textContent = state.publishStatus;
+    publishBtn.textContent = state.deployed ? 'Update App' : 'Publish App';
   }
 }
 
 async function buildEhpk(): Promise<void> {
   if (state.publishStatus === 'RUNNING' || state.publishStatus === 'PACKING') {
-    publishLog.textContent = 'Another operation is in progress. Please wait...';
-    await render();
-    return;
+    publishLog.textContent = 'Another operation is in progress.'; return;
   }
 
-  const configResponse = await fetch(`${CONTROL_URL}/config`, { cache: 'no-store' }).catch(() => null);
-  const configBody = (await configResponse?.json().catch(() => null)) as { config?: { appName?: string } } | null;
-  const defaultAppName = clampAppName((configBody?.config?.appName ?? 'even-g2-settings').trim() || 'even-g2-settings');
-
-  const appNameInput = window.prompt(`App name for .ehpk package (max ${MAX_APP_NAME_LENGTH} chars):`, defaultAppName);
-  const appName = clampAppName(appNameInput ?? '');
-  if (!appName) {
-    publishLog.textContent = 'Build cancelled: app name is required.';
-    await render();
-    return;
-  }
+  const configRes = await fetch(`${CONTROL_URL}/config`, { cache: 'no-store' }).catch(() => null);
+  const configBody = (await configRes?.json().catch(() => null)) as { config?: { appName?: string } } | null;
+  const defaultName = clampAppName((configBody?.config?.appName ?? 'video-display').trim() || 'video-display');
+  const appName = clampAppName(window.prompt(`App name for .ehpk (max ${MAX_APP_NAME_LENGTH} chars):`, defaultName) ?? '');
+  if (!appName) { publishLog.textContent = 'Cancelled.'; return; }
 
   state.publishStatus = 'PACKING';
-  publishBtn.disabled = true;
-  ehpkBtn.disabled = true;
-  publishLog.textContent = `Building .ehpk for "${appName}"...`;
-  await render();
+  publishBtn.disabled = true; ehpkBtn.disabled = true;
+  publishLog.textContent = `Building .ehpk for "${appName}"…`;
+  publishStatus.textContent = state.publishStatus;
 
   try {
     const response = await fetch(`${CONTROL_URL}/build-ehpk`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ appName }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ appName }),
     });
-
-    const body = (await response.json().catch(() => null)) as
-      | { error?: string; logs?: string; outputPath?: string }
-      | null;
-
+    const body = (await response.json().catch(() => null)) as { error?: string; logs?: string; outputPath?: string } | null;
     if (!response.ok) {
-      if (response.status === 409) {
-        state.publishStatus = 'PACKING';
-        publishLog.textContent = 'EHPK build already running. Please wait for it to finish.';
-        await render();
-        return;
-      }
+      if (response.status === 409) { publishLog.textContent = 'Already running.'; return; }
       throw new Error(body?.error ?? `HTTP ${response.status}`);
     }
-
     state.publishStatus = 'DONE';
-    publishLog.textContent = `${body?.logs ?? 'EHPK build complete.'}\n\nOutput:\n${body?.outputPath ?? 'unknown'}`;
-  } catch (error) {
+    publishLog.textContent = `${body?.logs ?? 'Done.'}\n\n${body?.outputPath ?? ''}`;
+  } catch (e) {
     state.publishStatus = 'FAILED';
-    publishLog.textContent = `Error: ${String(error)}`;
+    publishLog.textContent = `Error: ${String(e)}`;
   } finally {
-    publishBtn.disabled = false;
-    ehpkBtn.disabled = false;
-    await render();
+    publishBtn.disabled = false; ehpkBtn.disabled = false;
+    publishStatus.textContent = state.publishStatus;
   }
 }
 
-function setKeyboardFallback(): void {
-  window.addEventListener('keydown', (event) => {
-    if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === 'd') {
-      event.preventDefault();
-      debugToolsVisible = !debugToolsVisible;
-      debugToolsFieldset.style.display = debugToolsVisible ? '' : 'none';
-      console.log(`[debug-tools] ${debugToolsVisible ? 'shown' : 'hidden'} (${DEV_TOOLS_TOGGLE_SHORTCUT})`);
-      return;
-    }
-
-    if (event.key === 'Enter') return void applyAction('CLICK');
-    if (event.key === 'ArrowUp') return void applyAction('UP');
-    if (event.key === 'ArrowDown') return void applyAction('DOWN');
-    if (event.key.toLowerCase() === 'd') return void applyAction('DOUBLE_CLICK');
-  });
-}
-
-function wireBrowserSetupInteractions(): void {
-  setupSectionsRoot.addEventListener('click', (event) => {
-    const target = event.target as HTMLElement | null;
-    const button = target?.closest<HTMLButtonElement>('[data-section-index]');
-    if (!button) return;
-    const index = Number(button.dataset.sectionIndex);
-    state.settings.sectionIndex = clampInt(index, 0, SETTINGS_SECTIONS.length - 1);
-    state.settings.navigationScope = 'SECTION_LIST';
-    state.settings.detailIndex = 0;
-    state.lastAction = `Section: ${sectionLabel(getCurrentSection())}`;
-    void render();
-  });
-
-  setupDetailRoot.addEventListener('click', (event) => {
-    const target = event.target as HTMLElement | null;
-    const button = target?.closest<HTMLButtonElement>('[data-control-index]');
-    if (!button) return;
-    const index = Number(button.dataset.controlIndex);
-    state.settings.navigationScope = 'DETAIL';
-    state.settings.detailIndex = Math.max(0, index);
-    void applyAction('CLICK');
-  });
-}
-
-async function initControlHealth(): Promise<void> {
-  try {
-    const health = await fetch(`${CONTROL_URL}/health`, { cache: 'no-store' });
-    const info = (await health.json().catch(() => null)) as { capabilities?: string[]; version?: string } | null;
-    if (!health.ok || !info?.capabilities?.includes(REQUIRED_CONTROL_CAPABILITY)) {
-      publishLog.textContent = 'Control server is outdated. Run Run-Even-Sim.cmd to refresh local services.';
-    } else {
-      publishLog.textContent = `Control server ready (${info.version ?? 'unknown'})`;
-    }
-  } catch {
-    publishLog.textContent = 'Control server not reachable. Run Run-Even-Sim.cmd.';
-  }
-
-  try {
-    const response = await fetch(`${CONTROL_URL}/config`, { cache: 'no-store' });
-    const body = (await response.json().catch(() => null)) as { config?: { git?: { deployed?: boolean } } } | null;
-    state.deployed = !!body?.config?.git?.deployed;
-  } catch {
-    state.deployed = false;
-  }
-}
+// ── Bridge init ───────────────────────────────────────────────────────────────
 
 async function initBridge(): Promise<void> {
   try {
     bridge = await Promise.race([
       waitForEvenAppBridge(),
-      new Promise<never>((_, reject) => window.setTimeout(() => reject(new Error('Even bridge timeout')), 5000)),
+      new Promise<never>((_, rej) => window.setTimeout(() => rej(new Error('timeout')), 5000)),
     ]);
-
-    updateCapabilitiesFromBridge();
-    await createStartupPage();
-    await loadBridgePreferences();
-    await persistBridgePreferences();
-    await refreshDeviceSnapshot();
-
-    const b = asBridgeExtras();
-    if (b?.onDeviceStatusChanged) {
-      b.onDeviceStatusChanged(() => {
-        void refreshDeviceSnapshot().then(() => render());
-      });
-    }
-
-    const handleHubEvent = (event: unknown) => {
-      const vector = extractImuVector(event);
-      if (vector) {
-        state.settings.imuVector = vector;
-        if (state.settings.imuActive) {
-          void render();
-        }
-      }
-
-      const eventType = extractEventType(event);
-      let action = mapEventTypeToAction(eventType);
-      const payload = event as Record<string, unknown> | null | undefined;
-      if (!action && payload?.textEvent && !payload?.listEvent && !payload?.sysEvent) {
-        action = 'CLICK';
-      }
-      if (!action && shouldTreatEmptySysEventAsClick(event)) {
-        action = 'CLICK';
-      }
-
-      const eventLabel = action ?? 'NONE';
-      if (isDuplicateEvent(event, eventLabel)) return;
-      appendEventLog(`${new Date().toLocaleTimeString()}  ${eventLabel}`);
-      if (action) {
-        lastResolvedAction = action;
-        lastResolvedActionAt = Date.now();
-        console.log('[hub-event]', { action, eventType, event });
-        void applyAction(action);
-      }
-    };
-
-    bridge.onEvenHubEvent((event) => {
-      handleHubEvent(event);
-    });
-
-    window.addEventListener('evenHubEvent', (event: Event) => {
-      const detail = (event as CustomEvent).detail;
-      handleHubEvent(detail);
-    });
-  } catch (error) {
-    console.warn('Even bridge not ready, using browser fallback mode:', error);
-    bridge = null;
-    updateCapabilitiesFromBridge();
+    state.bridgeConnected = true;
+    const b = bridge as BridgeExtras;
+    log(`Bridge connected. canExit=${!!b.shutDownPageContainer}`);
+    await setupGlassesPage(false);
+    bridge.onEvenHubEvent((e) => handleHubEvent(e));
+    window.addEventListener('evenHubEvent', (e) => handleHubEvent((e as CustomEvent).detail));
+  } catch (err) {
+    log(`Bridge unavailable: ${String(err)}`);
+    bridge = null; state.bridgeConnected = false;
   }
 }
 
-async function init(): Promise<void> {
-  loadBrowserPreferences();
-  setKeyboardFallback();
-  wireBrowserSetupInteractions();
+async function initControlHealth(): Promise<void> {
+  try {
+    const h = await fetch(`${CONTROL_URL}/health`, { cache: 'no-store' });
+    const info = (await h.json().catch(() => null)) as { capabilities?: string[]; version?: string } | null;
+    publishLog.textContent = !h.ok || !info?.capabilities?.includes(REQUIRED_CONTROL_CAPABILITY)
+      ? 'Control server outdated. Run Run-Even-Sim.cmd.'
+      : `Control server ready (${info.version ?? 'unknown'})`;
+  } catch {
+    publishLog.textContent = 'Control server not reachable. Run Run-Even-Sim.cmd.';
+  }
+  try {
+    const r = await fetch(`${CONTROL_URL}/config`, { cache: 'no-store' });
+    const b = (await r.json().catch(() => null)) as { config?: { git?: { deployed?: boolean } } } | null;
+    state.deployed = !!b?.config?.git?.deployed;
+  } catch { state.deployed = false; }
+}
+
+// ── Wire interactions ─────────────────────────────────────────────────────────
+
+function wireInteractions(): void {
+  loadVideoBtn.addEventListener('click', () => void loadVideo());
+  videoUrlInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') void loadVideo(); });
+  clearVideoBtn.addEventListener('click', () => clearVideo());
+
+  fpsInput.addEventListener('change', () => {
+    state.userSettings.fps = clampFps(Number(fpsInput.value));
+    fpsInput.value = String(state.userSettings.fps);
+    persistUserSettings();
+    if (frameIntervalId !== null) startFrameCapture(); // restart at new rate
+    updateGlassesStatus();
+  });
+
+  autoplayToggle.addEventListener('change', () => { state.userSettings.autoplay = autoplayToggle.checked; persistUserSettings(); });
+  mutedToggle.addEventListener('change', () => {
+    state.userSettings.muted = mutedToggle.checked;
+    if (state.video.platform === 'direct') videoEl.muted = mutedToggle.checked;
+    persistUserSettings();
+  });
+
+  // Sliders ─────────────────────────────────────────────────────────────────
+  brightnessSlider.addEventListener('input', () => {
+    state.userSettings.filters.brightness = Number(brightnessSlider.value);
+    brightnessVal.textContent = brightnessSlider.value;
+    onFiltersChanged();
+  });
+  contrastSlider.addEventListener('input', () => {
+    state.userSettings.filters.contrast = Number(contrastSlider.value);
+    contrastVal.textContent = contrastSlider.value;
+    onFiltersChanged();
+  });
+  zoomSlider.addEventListener('input', () => {
+    state.userSettings.filters.zoom = Number(zoomSlider.value);
+    zoomVal.textContent = `${Number(zoomSlider.value).toFixed(2)}×`;
+    onFiltersChanged();
+  });
+  panxSlider.addEventListener('input', () => {
+    state.userSettings.filters.panX = Number(panxSlider.value);
+    panxVal.textContent = panxSlider.value;
+    onFiltersChanged();
+  });
+  panySlider.addEventListener('input', () => {
+    state.userSettings.filters.panY = Number(panySlider.value);
+    panyVal.textContent = panySlider.value;
+    onFiltersChanged();
+  });
+  invertToggle.addEventListener('change', () => {
+    state.userSettings.filters.invert = invertToggle.checked;
+    onFiltersChanged();
+  });
+  imgscaleSlider.addEventListener('input', () => {
+    const snapped = snapImgScale(Number(imgscaleSlider.value));
+    imgscaleSlider.value = String(snapped);
+    state.userSettings.filters.imgScale = snapped;
+    imgscaleVal.textContent = imgScaleLabel(snapped);
+    updateHudPreviewLayout();
+    if (bridge && imageContainerActive) void setupGlassesPage(true);
+    persistUserSettings();
+  });
+
+  // Reset-on-click labels ───────────────────────────────────────────────────
+  document.querySelectorAll<HTMLButtonElement>('button.slider-lbl').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const targetId = btn.dataset.target;
+      const defaultVal = btn.dataset.default ?? '0';
+      const slider = targetId ? document.querySelector<HTMLInputElement>(`#${targetId}`) : null;
+      if (!slider) return;
+      slider.value = defaultVal;
+      slider.dispatchEvent(new Event('input'));
+    });
+  });
 
   publishBtn.addEventListener('click', () => void publishApp());
   ehpkBtn.addEventListener('click', () => void buildEhpk());
 
+  window.addEventListener('keydown', (e) => {
+    if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'd') {
+      e.preventDefault();
+      debugToolsVisible = !debugToolsVisible;
+      debugToolsFieldset.style.display = debugToolsVisible ? '' : 'none';
+    }
+  });
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+
+async function init(): Promise<void> {
+  loadUserSettings();
+  syncAllInputs();
+  wireInteractions();
   await initControlHealth();
   await initBridge();
-  await render();
+  render();
 }
 
 void init();
