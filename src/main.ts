@@ -7,6 +7,7 @@ import {
   ImageRawDataUpdateResult,
   OsEventTypeList,
   RebuildPageContainer,
+  TextContainerProperty,
   waitForEvenAppBridge,
 } from '@evenrealities/even_hub_sdk';
 
@@ -33,6 +34,7 @@ type UserSettings = {
   fps: number;
   autoplay: boolean;
   muted: boolean;
+  showControlsKey: boolean;
   filters: ImageFilters;
 };
 
@@ -96,6 +98,8 @@ const state: AppState = {
     fps: DEFAULT_FPS,
     autoplay: false,
     muted: true,
+    showControlsKey: true,
+
     filters: { ...DEFAULT_FILTERS },
   },
   bridgeConnected: false,
@@ -115,16 +119,17 @@ const captureCanvas = document.createElement('canvas');
 captureCanvas.width = IMAGE_TILE_W;
 captureCanvas.height = IMAGE_TILE_H;
 const captureCtx = captureCanvas.getContext('2d')!;
-// Per-tile canvas used when slicing big-mode master into 4 quadrants
-const tileCanvas = document.createElement('canvas');
-tileCanvas.width = IMAGE_TILE_W;
-tileCanvas.height = IMAGE_TILE_H;
-const tileCtx = tileCanvas.getContext('2d')!;
 
 // Reusable video element
 const videoEl = document.createElement('video');
 videoEl.crossOrigin = 'anonymous';
 videoEl.preload = 'auto';
+videoEl.addEventListener('loadeddata', () => {
+  if (state.video.platform === 'direct') {
+    startFrameCapture();
+    void captureAndSendFrame();
+  }
+});
 
 // Diagnostic log
 const eventLines: string[] = [];
@@ -153,10 +158,18 @@ app.innerHTML = `
           <input id="video-url-input" type="text" placeholder="YouTube URL or direct .mp4/.webm link" />
         </div>
         <button id="load-video-btn" type="button">Load</button>
+        <button id="browse-video-btn" type="button">Browse</button>
+        <input id="video-file-input" type="file" accept="video/*" style="display:none" />
         <button id="clear-video-btn" type="button">Clear</button>
       </div>
       <div id="video-container" class="video-container">
         <div class="video-placeholder">Enter a video URL above and click Load</div>
+      </div>
+      <div class="controls-key">
+        <span class="controls-key-item">⬤ Click — Play / Pause</span>
+        <span class="controls-key-item">▲ Up — +10s</span>
+        <span class="controls-key-item">▼ Down — −10s</span>
+        <span class="controls-key-item">⬤⬤ Double — Mute toggle</span>
       </div>
       <p id="glasses-status" class="hint"></p>
     </fieldset>
@@ -171,6 +184,7 @@ app.innerHTML = `
         </div>
         <label class="toggle-label"><input id="autoplay-toggle" type="checkbox" /> Autoplay</label>
         <label class="toggle-label"><input id="muted-toggle" type="checkbox" checked /> Muted</label>
+        <label class="toggle-label"><input id="show-key-toggle" type="checkbox" checked /> Show Key on Glasses</label>
       </div>
       <div class="slider-grid">
         <button class="slider-lbl" data-target="brightness-slider" data-default="0">Brightness</button>
@@ -223,13 +237,16 @@ app.innerHTML = `
 
 const videoUrlInput  = requireElement(document.querySelector<HTMLInputElement>('#video-url-input'), '#video-url-input');
 const loadVideoBtn   = requireElement(document.querySelector<HTMLButtonElement>('#load-video-btn'), '#load-video-btn');
+const browseVideoBtn = requireElement(document.querySelector<HTMLButtonElement>('#browse-video-btn'), '#browse-video-btn');
+const videoFileInput = requireElement(document.querySelector<HTMLInputElement>('#video-file-input'), '#video-file-input');
 const clearVideoBtn  = requireElement(document.querySelector<HTMLButtonElement>('#clear-video-btn'), '#clear-video-btn');
 const videoContainer = requireElement(document.querySelector<HTMLDivElement>('#video-container'), '#video-container');
 const glassesStatus  = requireElement(document.querySelector<HTMLParagraphElement>('#glasses-status'), '#glasses-status');
 const fpsInput       = requireElement(document.querySelector<HTMLInputElement>('#fps-input'), '#fps-input');
 const autoplayToggle = requireElement(document.querySelector<HTMLInputElement>('#autoplay-toggle'), '#autoplay-toggle');
 const mutedToggle    = requireElement(document.querySelector<HTMLInputElement>('#muted-toggle'), '#muted-toggle');
-const invertToggle   = requireElement(document.querySelector<HTMLInputElement>('#invert-toggle'), '#invert-toggle');
+const invertToggle          = requireElement(document.querySelector<HTMLInputElement>('#invert-toggle'), '#invert-toggle');
+const showKeyToggle         = requireElement(document.querySelector<HTMLInputElement>('#show-key-toggle'), '#show-key-toggle');
 
 // Sliders
 const brightnessSlider = requireElement(document.querySelector<HTMLInputElement>('#brightness-slider'), '#brightness-slider');
@@ -333,25 +350,7 @@ function buildEmbedUrl(rawUrl: string): { embedUrl: string; platform: Exclude<Vi
   return { embedUrl: safe, platform: 'iframe' };
 }
 
-async function tryYoutubeProxy(youtubeUrl: string): Promise<string | null> {
-  const endpoint = `${CONTROL_URL}/video-info?url=${encodeURIComponent(youtubeUrl)}`;
-  log(`Proxy: GET ${endpoint.slice(0, 72)}...`);
-  try {
-    const response = await fetch(endpoint, { cache: 'no-store', signal: AbortSignal.timeout(15000) });
-    log(`Proxy: HTTP ${response.status} ${response.statusText}`);
-    const text = await response.text();
-    log(`Proxy: body = ${text.slice(0, 160)}`);
-    if (!response.ok) return null;
-    const info = JSON.parse(text) as { ok: boolean; proxyUrl?: string; error?: string };
-    if (!info.ok) { log(`Proxy: server error — ${info.error ?? 'unknown'}`); return null; }
-    if (!info.proxyUrl) { log('Proxy: no proxyUrl in response'); return null; }
-    log(`Proxy: success → ${info.proxyUrl.slice(0, 60)}`);
-    return info.proxyUrl;
-  } catch (err) {
-    log(`Proxy: fetch threw — ${String(err)}`);
-    return null;
-  }
-}
+
 
 // ── Canvas filter + transform pipeline ───────────────────────────────────────
 
@@ -418,6 +417,7 @@ function stopFrameCapture(): void {
 function startFrameCapture(): void {
   stopFrameCapture();
   if (!state.video.loaded || state.video.platform !== 'direct') return;
+
   const ms = Math.max(100, Math.round(1000 / state.userSettings.fps));
   frameIntervalId = setInterval(() => void captureAndSendFrame(), ms);
 }
@@ -425,9 +425,9 @@ function startFrameCapture(): void {
 async function captureAndSendFrame(): Promise<void> {
   if (isTransmittingFrame) return;
 
-  if (videoEl.readyState < 2 || videoEl.paused || videoEl.ended) {
+  if (videoEl.readyState < 2) {
     if (!_frameLoggedSkip) {
-      log(`Frame: skip — readyState=${videoEl.readyState} paused=${videoEl.paused} ended=${videoEl.ended}`);
+      log(`Frame: skip — readyState=${videoEl.readyState}`);
       _frameLoggedSkip = true;
     }
     return;
@@ -448,45 +448,17 @@ async function captureAndSendFrame(): Promise<void> {
     return;
   }
 
-  const big = state.userSettings.filters.imgBig;
   isTransmittingFrame = true;
   try {
-    if (!big) {
-      // Small: single tile
-      const base64 = captureCanvas.toDataURL('image/jpeg', 0.6).split(',')[1];
-      const result = await bridge.updateImageRawData(new ImageRawDataUpdate({
-        containerID: TILE_IDS[0],
-        containerName: TILE_NAMES[0],
-        imageData: base64,
-      }));
-      if (!ImageRawDataUpdateResult.isSuccess(result)) {
-        log(`Frame: tile1 failed — ${String(result)}`);
-      }
-    } else {
-      // Big: slice master 400×200 into 4 quadrants and send sequentially
-      const offsets = [
-        { col: 0, row: 0 }, // TL → ID 1
-        { col: 1, row: 0 }, // TR → ID 2
-        { col: 0, row: 1 }, // BL → ID 3
-        { col: 1, row: 1 }, // BR → ID 4
-      ];
-      for (let i = 0; i < 4; i++) {
-        const { col, row } = offsets[i];
-        tileCtx.drawImage(
-          captureCanvas,
-          col * IMAGE_TILE_W, row * IMAGE_TILE_H, IMAGE_TILE_W, IMAGE_TILE_H,
-          0, 0, IMAGE_TILE_W, IMAGE_TILE_H,
-        );
-        const base64 = tileCanvas.toDataURL('image/jpeg', 0.6).split(',')[1];
-        const result = await bridge.updateImageRawData(new ImageRawDataUpdate({
-          containerID: TILE_IDS[i],
-          containerName: TILE_NAMES[i],
-          imageData: base64,
-        }));
-        if (!ImageRawDataUpdateResult.isSuccess(result)) {
-          log(`Frame: tile${i + 1} failed — ${String(result)}`);
-        }
-      }
+    // Single tile — captureCanvas is 200×100 (small) or 400×200 (big), matching the image container
+    const base64 = captureCanvas.toDataURL('image/jpeg', 0.6).split(',')[1];
+    const result = await bridge.updateImageRawData(new ImageRawDataUpdate({
+      containerID: TILE_IDS[0],
+      containerName: TILE_NAMES[0],
+      imageData: base64,
+    }));
+    if (!ImageRawDataUpdateResult.isSuccess(result)) {
+      log(`Frame: failed — ${String(result)}`);
     }
   } catch (err) {
     log(`Frame: send threw — ${String(err)}`);
@@ -495,42 +467,53 @@ async function captureAndSendFrame(): Promise<void> {
   }
 }
 
-// ── Glasses page (image container only, no text) ──────────────────────────────
+// ── Glasses page ──────────────────────────────────────────────────────────────
+
+const KEY_CONTAINER_ID   = 5;
+const KEY_CONTAINER_NAME = 'key';
+
+// Always 2 containers: 1 image (video) + 1 capture text (left strip, never overlaps image).
+// Keeping container count/type constant means rebuildPageContainer always succeeds.
+function buildGlassesPayload(): { containerTotalNum: number; imageObject: ImageContainerProperty[]; textObject: TextContainerProperty[] } {
+  const big = state.userSettings.filters.imgBig;
+  const imgW = big ? IMAGE_TILE_W * 2 : IMAGE_TILE_W;
+  const imgH = big ? IMAGE_TILE_H * 2 : IMAGE_TILE_H;
+  const imgX = big ? BIG_X : SMALL_X;
+  const imgY = big ? BIG_Y : SMALL_Y;
+  return {
+    containerTotalNum: 2,
+    imageObject: [new ImageContainerProperty({ containerID: TILE_IDS[0], containerName: TILE_NAMES[0], xPosition: imgX, yPosition: imgY, width: imgW, height: imgH })],
+    // Left strip (x=0..BIG_X=88) never overlaps image tiles in any mode
+    textObject: [new TextContainerProperty({ containerID: KEY_CONTAINER_ID, containerName: KEY_CONTAINER_NAME, xPosition: 0, yPosition: 0, width: BIG_X, height: 288, content: '', isEventCapture: 1 })],
+  };
+}
 
 async function setupGlassesPage(withImage: boolean): Promise<void> {
   if (!bridge) return;
 
-  const big = state.userSettings.filters.imgBig;
-  const payload = withImage
-    ? big
-      ? {
-          containerTotalNum: 4,
-          imageObject: [
-            new ImageContainerProperty({ containerID: TILE_IDS[0], containerName: TILE_NAMES[0], xPosition: BIG_X,                  yPosition: BIG_Y,                  width: IMAGE_TILE_W, height: IMAGE_TILE_H }),
-            new ImageContainerProperty({ containerID: TILE_IDS[1], containerName: TILE_NAMES[1], xPosition: BIG_X + IMAGE_TILE_W,   yPosition: BIG_Y,                  width: IMAGE_TILE_W, height: IMAGE_TILE_H }),
-            new ImageContainerProperty({ containerID: TILE_IDS[2], containerName: TILE_NAMES[2], xPosition: BIG_X,                  yPosition: BIG_Y + IMAGE_TILE_H,   width: IMAGE_TILE_W, height: IMAGE_TILE_H }),
-            new ImageContainerProperty({ containerID: TILE_IDS[3], containerName: TILE_NAMES[3], xPosition: BIG_X + IMAGE_TILE_W,   yPosition: BIG_Y + IMAGE_TILE_H,   width: IMAGE_TILE_W, height: IMAGE_TILE_H }),
-          ],
-        }
-      : {
-          containerTotalNum: 1,
-          imageObject: [new ImageContainerProperty({ containerID: TILE_IDS[0], containerName: TILE_NAMES[0], xPosition: SMALL_X, yPosition: SMALL_Y, width: IMAGE_TILE_W, height: IMAGE_TILE_H })],
-        }
-    : { containerTotalNum: 0 };
+  const payload = buildGlassesPayload();
 
-  if (!startupCreated) {
-    const result = await bridge.createStartUpPageContainer(new CreateStartUpPageContainer(payload));
-    startupCreated = result === 0;
+  try {
     if (!startupCreated) {
+      const result = await bridge.createStartUpPageContainer(new CreateStartUpPageContainer(payload));
+      log(`createStartUp result=${result}`);
+      startupCreated = result === 0;
+      if (!startupCreated) {
+        const ok = await bridge.rebuildPageContainer(new RebuildPageContainer(payload));
+        log(`rebuild result=${ok}`);
+        startupCreated = !!ok;
+      }
+    } else {
       const ok = await bridge.rebuildPageContainer(new RebuildPageContainer(payload));
-      startupCreated = !!ok;
+      log(`rebuild result=${ok}`);
     }
-  } else {
-    await bridge.rebuildPageContainer(new RebuildPageContainer(payload));
+  } catch (err) {
+    log(`setupGlassesPage error: ${String(err)}`);
   }
 
   imageContainerActive = withImage && startupCreated;
   log(`Glasses page: withImage=${withImage} active=${imageContainerActive}`);
+  if (imageContainerActive) void captureAndSendFrame();
 }
 
 // ── Video rendering ───────────────────────────────────────────────────────────
@@ -576,7 +559,7 @@ function updateGlassesStatus(): void {
     const label = parseYoutubeId(state.video.inputUrl) ? 'YouTube' : 'Video';
     glassesStatus.textContent = `${label} streaming to glasses at ${state.userSettings.fps} fps.`;
   } else if (state.video.platform === 'youtube') {
-    glassesStatus.textContent = 'YouTube plays in browser only — control server unreachable.';
+    glassesStatus.textContent = 'YouTube plays in browser only. Use Browse to pick a local video for glasses.';
   } else {
     glassesStatus.textContent = 'Video plays in browser. Glasses show nothing (not a direct video URL).';
   }
@@ -606,6 +589,7 @@ function onFiltersChanged(): void {
   updateSliderDisplays();
   applyFiltersToBrowserVideo();
   persistUserSettings();
+  void captureAndSendFrame();
 }
 
 // ── Render ────────────────────────────────────────────────────────────────────
@@ -629,18 +613,6 @@ async function loadVideo(): Promise<void> {
     videoContainer.innerHTML = '<div class="video-placeholder error">Invalid URL — enter a valid http/https URL.</div>';
     glassesStatus.textContent = '';
     return;
-  }
-
-  if (result.platform === 'youtube') {
-    glassesStatus.textContent = 'Resolving YouTube via proxy…';
-    log('loadVideo: YouTube URL detected, trying proxy…');
-    const proxyUrl = await tryYoutubeProxy(raw);
-    if (proxyUrl) {
-      log('loadVideo: proxy resolved → direct mode');
-      result = { embedUrl: proxyUrl, platform: 'direct' };
-    } else {
-      log('loadVideo: proxy unavailable → iframe fallback');
-    }
   }
 
   stopFrameCapture();
@@ -678,6 +650,7 @@ function loadUserSettings(): void {
     if (typeof parsed.fps === 'number') state.userSettings.fps = clampFps(parsed.fps);
     if (typeof parsed.autoplay === 'boolean') state.userSettings.autoplay = parsed.autoplay;
     if (typeof parsed.muted === 'boolean') state.userSettings.muted = parsed.muted;
+    if (typeof parsed.showControlsKey === 'boolean') state.userSettings.showControlsKey = parsed.showControlsKey;
     if (parsed.filters) {
       const f = parsed.filters;
       if (typeof f.brightness === 'number') state.userSettings.filters.brightness = clamp(f.brightness, -100, 100);
@@ -695,6 +668,7 @@ function syncAllInputs(): void {
   fpsInput.value = String(state.userSettings.fps);
   autoplayToggle.checked = state.userSettings.autoplay;
   mutedToggle.checked = state.userSettings.muted;
+  showKeyToggle.checked = state.userSettings.showControlsKey ?? true;
   updateSliderDisplays();
 }
 
@@ -712,47 +686,78 @@ function clampAppName(v: string): string {
 
 // ── Bridge events ─────────────────────────────────────────────────────────────
 
-function extractEventType(event: unknown): unknown {
-  const i = event as Record<string, unknown> | null | undefined;
-  if (!i) return null;
-  const l = i.listEvent as Record<string, unknown> | null;
-  const t = i.textEvent as Record<string, unknown> | null;
-  const s = i.sysEvent as Record<string, unknown> | null;
-  return l?.eventType ?? t?.eventType ?? s?.eventType ?? l?.type ?? t?.type ?? s?.type ?? i.eventType ?? i.type ?? i.name;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function extractEventType(event: any): unknown {
+  return event?.listEvent?.eventType
+    ?? event?.textEvent?.eventType
+    ?? event?.sysEvent?.eventType
+    ?? event?.listEvent?.type
+    ?? event?.textEvent?.type
+    ?? event?.sysEvent?.type
+    ?? event?.eventType
+    ?? event?.type
+    ?? event?.name;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function mapEventType(eventType: unknown): string | null {
   if (eventType === undefined || eventType === null) return null;
   const n = OsEventTypeList.fromJson?.(eventType);
-  if (n === OsEventTypeList.CLICK_EVENT) return 'CLICK';
-  if (n === OsEventTypeList.SCROLL_TOP_EVENT) return 'UP';
-  if (n === OsEventTypeList.SCROLL_BOTTOM_EVENT) return 'DOWN';
-  if (n === OsEventTypeList.DOUBLE_CLICK_EVENT) return 'DOUBLE_CLICK';
-  if (eventType === 0) return 'CLICK';
-  if (eventType === 1) return 'UP';
-  if (eventType === 2) return 'DOWN';
-  if (eventType === 3) return 'DOUBLE_CLICK';
+  if (n === OsEventTypeList.CLICK_EVENT   || eventType === OsEventTypeList.CLICK_EVENT   || eventType === 0) return 'CLICK';
+  if (n === OsEventTypeList.SCROLL_TOP_EVENT    || eventType === OsEventTypeList.SCROLL_TOP_EVENT    || eventType === 1) return 'UP';
+  if (n === OsEventTypeList.SCROLL_BOTTOM_EVENT || eventType === OsEventTypeList.SCROLL_BOTTOM_EVENT || eventType === 2) return 'DOWN';
+  if (n === OsEventTypeList.DOUBLE_CLICK_EVENT  || eventType === OsEventTypeList.DOUBLE_CLICK_EVENT  || eventType === 3) return 'DOUBLE_CLICK';
   const t = String(eventType).toUpperCase();
-  if (t.includes('DOUBLE')) return 'DOUBLE_CLICK';
-  if (t.includes('SCROLL_TOP') || t === 'UP') return 'UP';
-  if (t.includes('SCROLL_BOTTOM') || t === 'DOWN') return 'DOWN';
-  if (t === 'CLICK' || t.includes('CLICK_EVENT') || t === 'TAP') return 'CLICK';
+  if (t.includes('DOUBLE') && (t.includes('CLICK') || t.includes('TAP'))) return 'DOUBLE_CLICK';
+  if (t.includes('SCROLL_TOP')    || t === 'UP'   || t.includes('SWIPE_UP'))   return 'UP';
+  if (t.includes('SCROLL_BOTTOM') || t === 'DOWN' || t.includes('SWIPE_DOWN')) return 'DOWN';
+  if ((t.includes('SINGLE') && (t.includes('CLICK') || t.includes('TAP'))) || t === 'CLICK' || t === 'TAP' || t.includes('CLICK_EVENT')) return 'CLICK';
   return null;
 }
 
 function isDuplicateEvent(event: unknown, label: string): boolean {
-  const p = event as Record<string, unknown> | null | undefined;
-  const sig = JSON.stringify({ l: p?.listEvent ?? null, t: p?.textEvent ?? null, s: p?.sysEvent ?? null, e: p?.eventType ?? null });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const p = event as any;
+  const sig = JSON.stringify({ l: p?.listEvent ?? null, t: p?.textEvent ?? null, s: p?.sysEvent ?? null, e: p?.eventType ?? null, ty: p?.type ?? null });
   const now = Date.now();
   if (label === lastEventLabel && sig === lastEventSignature && now - lastEventAt < 140) return true;
   lastEventLabel = label; lastEventSignature = sig; lastEventAt = now;
   return false;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function shouldTreatAsClick(event: any): boolean {
+  const explicit = mapEventType(extractEventType(event));
+  if (explicit) return false;
+  // Any unresolved event is treated as a click, except right after a double-click
+  const sinceLast = Date.now() - lastEventAt;
+  if (lastEventLabel === 'DOUBLE_CLICK' && sinceLast < 350) return false;
+  return true;
+}
+
 function handleHubEvent(event: unknown): void {
-  const label = mapEventType(extractEventType(event)) ?? 'EVENT';
-  if (isDuplicateEvent(event, label)) return;
-  log(label);
+  log(`raw: ${JSON.stringify(event).slice(0, 120)}`);
+  const eventType = extractEventType(event);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const action = mapEventType(eventType) ?? (shouldTreatAsClick(event as any) ? 'CLICK' : null);
+  const eventLabel = action ?? 'NONE';
+  if (isDuplicateEvent(event, eventLabel)) return;
+  log(eventLabel);
+  if (action) console.log('[hub-event]', { action, eventType, event });
+  if (!action || !state.video.loaded || state.video.platform !== 'direct') return;
+  if (action === 'CLICK') {
+    if (videoEl.paused) videoEl.play().catch(() => undefined);
+    else videoEl.pause();
+  } else if (action === 'UP') {
+    videoEl.currentTime = Math.min(videoEl.currentTime + 10, videoEl.duration || Infinity);
+  } else if (action === 'DOWN') {
+    videoEl.currentTime = Math.max(videoEl.currentTime - 10, 0);
+  } else if (action === 'DOUBLE_CLICK') {
+    state.userSettings.muted = !state.userSettings.muted;
+    videoEl.muted = state.userSettings.muted;
+    mutedToggle.checked = state.userSettings.muted;
+    persistUserSettings();
+  }
 }
 
 // ── Publish / EHPK ────────────────────────────────────────────────────────────
@@ -850,6 +855,7 @@ async function buildEhpk(): Promise<void> {
 // ── Bridge init ───────────────────────────────────────────────────────────────
 
 async function initBridge(): Promise<void> {
+  window.addEventListener('evenHubEvent', (e) => handleHubEvent((e as CustomEvent).detail));
   try {
     bridge = await Promise.race([
       waitForEvenAppBridge(),
@@ -860,7 +866,7 @@ async function initBridge(): Promise<void> {
     log(`Bridge connected. canExit=${!!b.shutDownPageContainer}`);
     await setupGlassesPage(false);
     bridge.onEvenHubEvent((e) => handleHubEvent(e));
-    window.addEventListener('evenHubEvent', (e) => handleHubEvent((e as CustomEvent).detail));
+    log('Event listener registered');
   } catch (err) {
     log(`Bridge unavailable: ${String(err)}`);
     bridge = null; state.bridgeConnected = false;
@@ -909,6 +915,20 @@ async function initControlHealth(): Promise<void> {
 function wireInteractions(): void {
   loadVideoBtn.addEventListener('click', () => void loadVideo());
   videoUrlInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') void loadVideo(); });
+  browseVideoBtn.addEventListener('click', () => videoFileInput.click());
+  videoFileInput.addEventListener('change', () => {
+    const file = videoFileInput.files?.[0];
+    if (!file) return;
+    const objectUrl = URL.createObjectURL(file);
+    stopFrameCapture();
+    state.video = { inputUrl: file.name, embedUrl: objectUrl, platform: 'direct', loaded: true };
+    videoUrlInput.value = '';
+    persistUserSettings();
+    if (bridge) void setupGlassesPage(true);
+    render();
+    startFrameCapture();
+    videoFileInput.value = '';
+  });
   clearVideoBtn.addEventListener('click', () => clearVideo());
 
   fpsInput.addEventListener('change', () => {
@@ -920,6 +940,11 @@ function wireInteractions(): void {
   });
 
   autoplayToggle.addEventListener('change', () => { state.userSettings.autoplay = autoplayToggle.checked; persistUserSettings(); });
+  showKeyToggle.addEventListener('change', () => {
+    state.userSettings.showControlsKey = showKeyToggle.checked;
+    persistUserSettings();
+    if (bridge && imageContainerActive) void setupGlassesPage(true);
+  });
   mutedToggle.addEventListener('change', () => {
     state.userSettings.muted = mutedToggle.checked;
     if (state.video.platform === 'direct') videoEl.muted = mutedToggle.checked;
@@ -991,7 +1016,14 @@ function wireInteractions(): void {
       e.preventDefault();
       debugToolsVisible = !debugToolsVisible;
       debugToolsFieldset.style.display = debugToolsVisible ? '' : 'none';
+      return;
     }
+    // Keyboard fallback: simulate glasses button presses for browser testing
+    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+    if (e.key === 'Enter') { e.preventDefault(); handleHubEvent({ sysEvent: { eventType: 0 } }); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); handleHubEvent({ sysEvent: { eventType: 1 } }); }
+    else if (e.key === 'ArrowDown') { e.preventDefault(); handleHubEvent({ sysEvent: { eventType: 2 } }); }
+    else if (e.key.toLowerCase() === 'd' && !e.ctrlKey && !e.shiftKey) { e.preventDefault(); handleHubEvent({ sysEvent: { eventType: 3 } }); }
   });
 }
 

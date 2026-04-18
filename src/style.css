@@ -298,6 +298,19 @@ button:disabled {
   font-size: 0.76rem;
 }
 
+.controls-key {
+  display: flex;
+  gap: 16px;
+  margin: 8px 0 0;
+  flex-wrap: wrap;
+}
+
+.controls-key-item {
+  color: #5a6a5a;
+  font-size: 0.72rem;
+  font-family: 'Consolas', monospace;
+}
+
 /* ── Slider grid ────────────────────────────────────────────────────────────── */
 
 .slider-grid {
